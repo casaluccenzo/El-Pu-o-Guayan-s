@@ -431,20 +431,46 @@ ejecutar, no asumirlo de una fecha de spec pasada).
   los ~40-60 call sites que ya las consumen), pero leyendo de SQLite local
   en vez de `client.from(...).select()`.
 
-- [ ] **Step 1: Reescribir cada función, una por una, manteniendo la firma**
+- [x] **Step 1: Reescribir cada función, una por una, manteniendo la firma**
 
-  P.ej. `fetchProducts()` pasa de `client.from('products').select('*')` a
-  `db.getAll('SELECT * FROM products')` (o el equivalente reactivo/watch de
-  PowerSync si conviene para que la UI se actualice sola — evaluar
-  `db.watch()` vs. fetch puntual caso por caso).
+  Las 7 reescritas con un `getLocalDb()` compartido al tope del archivo, no
+  `db.watch()` (queda para si hace falta más adelante) — cada función
+  intenta la lectura local primero y cae a Supabase si no aplica.
 
-- [ ] **Step 2: Test manual por función**
+  **Hallazgo importante no anticipado por el plan:** `getLocalDb()` no
+  puede devolver la base con solo que `window.PowerSyncManager.db` exista
+  -- ese objeto se crea en el arranque de la página (`client.js`),
+  **antes** del login, y `connect()` (Task 3) recién corre en
+  `handleUserLogin` tras un login exitoso. `loadAllDataFromSupabase()`
+  (que llama a estas 7 funciones) corre en la inicialización de la app,
+  **antes** de cualquier login. Sin un chequeo adicional, esa primerísima
+  carga leería una tabla local vacía en vez de traer los datos reales de
+  Supabase -- el catálogo se habría visto vacío hasta loguearse. Se
+  resolvió gateando en `db.currentStatus.hasSynced` (confirmado contra el
+  `.d.ts` real de `@powersync/common`), no solo en la existencia del
+  objeto. Verificado en navegador: antes de sincronizar,
+  `hasSynced === false` y el catálogo sigue cargando 29 productos reales
+  desde Supabase, sin cambios.
 
-  Cada una contra `casa-lucenzo-dev` con el seed de Plan A: confirmar que
-  devuelve las mismas filas/forma que la versión Supabase-directo que
-  reemplaza.
+  También se atendieron dos observaciones de Gemini, verificadas antes de
+  aplicarlas: (a) `use_auto_bcv`/`totp_enabled` de `app_config` llegan como
+  `0`/`1` desde SQLite -- varios call sites comparan con `!== false`, que
+  da `true` para CUALQUIER número (tipos distintos, nunca son
+  estrictamente iguales a `false`), así que `mapAppConfigRow` los
+  normaliza con `!!` de vuelta a boolean real; (b) `sales`/`expenses`/
+  `debts`/`replenishments` preservan la columna `uuid` explícita en
+  paralelo al `id` local (ya resuelto desde el schema de Task 3), así que
+  el código existente que lee `.uuid` sigue funcionando sin cambios.
 
-- [ ] **Step 3: Commit**
+- [~] **Step 2: Test manual por función — parcial**
+
+  Verificado el camino de fallback a Supabase (pre-login, sin cambios) en
+  el dev server local. **Falta** probarlo contra `casa-lucenzo-dev` con un
+  login real y datos sincronizados de verdad (necesita credenciales de un
+  usuario de prueba en ese proyecto, que este agente no tiene) -- pendiente
+  para cuando Gustavo pueda loguearse con un build de esta rama.
+
+- [x] **Step 3: Commit**
 
 ---
 

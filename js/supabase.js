@@ -329,32 +329,82 @@ async function fetchAllPages(buildQuery) {
     return rows;
 }
 
+// Plan B, Task 4: reads move from client.from(...) (Supabase direct) to the
+// local PowerSync/SQLite database once it has actually synced at least once.
+// The db OBJECT exists from page load regardless of login (js/powersync/
+// client.js constructs it eagerly) -- but connect() only runs after a
+// successful login (handleUserLogin), and loadAllDataFromSupabase() runs
+// at app init, BEFORE any login. Gating on hasSynced (not just object
+// existence) matters: without it, that very first pre-login load would
+// read an empty local table instead of falling back to Supabase, and the
+// product catalog would render empty until after someone logs in.
+// A plain property access, not a call -- safe in Node under tests/unit.test.js
+// (global.window is shimmed there, but PowerSyncManager never gets defined,
+// so this is just undefined, not a ReferenceError).
+function getLocalDb() {
+    const manager = window.PowerSyncManager;
+    if (!manager || !manager.db) return null;
+    const status = manager.db.currentStatus;
+    if (!status || !status.hasSynced) return null;
+    return manager.db;
+}
+
+// `initial_stock` is the day's load baseline and 0 is a legitimate value
+// (nothing loaded yet). Substituting `stock` for a missing value used to also
+// fire on a real 0, silently rewriting the baseline on every background sync
+// and making the day's totals drift.
+function mapProductRow(p) {
+    return {
+        ...p,
+        initial_stock: (p.initial_stock !== null && p.initial_stock !== undefined) ? p.initial_stock : p.stock
+    };
+}
+
 async function fetchProducts() {
+    const localDb = getLocalDb();
+    if (localDb) {
+        try {
+            const rows = await localDb.getAll('SELECT * FROM products ORDER BY name');
+            return rows.map(mapProductRow);
+        } catch (e) {
+            console.error("Error fetching products from PowerSync local DB:", e);
+            return null;
+        }
+    }
     if (!client) return null;
     try {
         const { data, error } = await client.from('products').select('*').order('name');
         if (error) throw error;
-        // `initial_stock` is the day's load baseline and 0 is a legitimate
-        // value (nothing loaded yet). The old fallback treated 0 as "missing"
-        // and substituted the current stock, which silently rewrote the
-        // baseline on every background sync and made the day's totals drift.
-        return data.map(p => ({
-            ...p,
-            initial_stock: (p.initial_stock !== null && p.initial_stock !== undefined) ? p.initial_stock : p.stock
-        }));
+        return data.map(mapProductRow);
     } catch (e) {
         console.error("Error fetching products from Supabase:", e);
         return null;
     }
 }
 
+function currentSalesExpensesFilterTime() {
+    const todayStart = new Date();
+    todayStart.setHours(0, 0, 0, 0);
+    return supabaseLastCloseTime ? supabaseLastCloseTime : todayStart.toISOString();
+}
+
 async function fetchSales() {
+    const localDb = getLocalDb();
+    if (localDb) {
+        try {
+            const rows = await localDb.getAll(
+                'SELECT * FROM sales WHERE timestamp >= ? ORDER BY timestamp ASC, uuid ASC',
+                [currentSalesExpensesFilterTime()]
+            );
+            return rows.map(s => ({ ...s, productId: s.product_id }));
+        } catch (e) {
+            console.error("Error fetching sales from PowerSync local DB:", e);
+            return null;
+        }
+    }
     if (!client) return null;
     try {
-        const todayStart = new Date();
-        todayStart.setHours(0, 0, 0, 0);
-
-        const filterTime = supabaseLastCloseTime ? supabaseLastCloseTime : todayStart.toISOString();
+        const filterTime = currentSalesExpensesFilterTime();
 
         // Must page like every other unbounded sales read (see the note above
         // fetchAllPages). A single day normally sits far under the 1000-row
@@ -376,16 +426,23 @@ async function fetchSales() {
 }
 
 async function fetchExpenses() {
+    const localDb = getLocalDb();
+    if (localDb) {
+        try {
+            return await localDb.getAll(
+                'SELECT * FROM expenses WHERE timestamp >= ? ORDER BY timestamp ASC, uuid ASC',
+                [currentSalesExpensesFilterTime()]
+            );
+        } catch (e) {
+            console.error("Error fetching expenses from PowerSync local DB:", e);
+            return null;
+        }
+    }
     if (!client) return null;
     try {
-        const todayStart = new Date();
-        todayStart.setHours(0, 0, 0, 0);
-
-        const filterTime = supabaseLastCloseTime ? supabaseLastCloseTime : todayStart.toISOString();
-
         // Paged for the same reason as fetchSales above.
         return await fetchAllPages(offset => client.from('expenses').select('*')
-            .gte('timestamp', filterTime)
+            .gte('timestamp', currentSalesExpensesFilterTime())
             .order('timestamp', { ascending: true })
             .order('uuid', { ascending: true })
             .range(offset, offset + POSTGREST_PAGE_SIZE - 1));
@@ -396,6 +453,16 @@ async function fetchExpenses() {
 }
 
 async function fetchDebts() {
+    const localDb = getLocalDb();
+    if (localDb) {
+        try {
+            const rows = await localDb.getAll('SELECT * FROM debts ORDER BY timestamp DESC');
+            return rows.map(d => ({ ...d, clientName: d.client_name }));
+        } catch (e) {
+            console.error("Error fetching debts from PowerSync local DB:", e);
+            return null;
+        }
+    }
     if (!client) return null;
     try {
         const { data, error } = await client.from('debts').select('*').order('timestamp', { ascending: false });
@@ -408,6 +475,16 @@ async function fetchDebts() {
 }
 
 async function fetchReplenishments() {
+    const localDb = getLocalDb();
+    if (localDb) {
+        try {
+            const rows = await localDb.getAll("SELECT * FROM replenishments WHERE status != 'recibido'");
+            return rows.map(r => ({ ...r, productId: r.product_id }));
+        } catch (e) {
+            console.error("Error fetching replenishments from PowerSync local DB:", e);
+            return null;
+        }
+    }
     if (!client) return null;
     try {
         const { data, error } = await client.from('replenishments').select('*').neq('status', 'recibido');
@@ -420,6 +497,15 @@ async function fetchReplenishments() {
 }
 
 async function fetchIngredients() {
+    const localDb = getLocalDb();
+    if (localDb) {
+        try {
+            return await localDb.getAll('SELECT * FROM ingredients ORDER BY name');
+        } catch (e) {
+            console.error("Error fetching ingredients from PowerSync local DB:", e);
+            return null;
+        }
+    }
     if (!client) return null;
     try {
         const { data, error } = await client.from('ingredients').select('*').order('name');
@@ -1078,11 +1164,42 @@ async function setProfileActive(id, active) {
     }
 }
 
+// SQLite has no boolean type -- PowerSync stores use_auto_bcv/totp_enabled
+// as 0/1 (see js/powersync/schema.js). Several call sites compare these with
+// `!== false`, which is true for either 0 or 1 (different type, so never
+// strictly equal to the boolean `false`) -- silently always "on" once read
+// from the local DB unless coerced back to a real boolean here.
+function mapAppConfigRow(data) {
+    if (!data) return data;
+    return {
+        ...data,
+        use_auto_bcv: !!data.use_auto_bcv,
+        totp_enabled: !!data.totp_enabled
+    };
+}
+
 async function fetchAppConfig() {
+    const localDb = getLocalDb();
+    if (localDb) {
+        try {
+            const data = mapAppConfigRow(await localDb.getOptional('SELECT * FROM app_config WHERE id = 1'));
+            if (data) {
+                dbSupportsLastClose = ('last_close_time' in data);
+                if (dbSupportsLastClose && data.last_close_time) {
+                    supabaseLastCloseTime = data.last_close_time;
+                }
+            }
+            return data;
+        } catch (e) {
+            console.error("Error fetching app config from PowerSync local DB:", e);
+            return null;
+        }
+    }
     if (!client) return null;
     try {
-        const { data, error } = await client.from('app_config').select('*').eq('id', 1).maybeSingle();
+        const { data: rawData, error } = await client.from('app_config').select('*').eq('id', 1).maybeSingle();
         if (error) throw error;
+        const data = mapAppConfigRow(rawData);
         if (data) {
             dbSupportsLastClose = ('last_close_time' in data);
             if (dbSupportsLastClose && data.last_close_time) {
