@@ -44,7 +44,35 @@ module.exports = async (req, res) => {
         if (!ok) {
             return res.status(502).json({ ok: false, error: 'Supabase PATCH failed' });
         }
-        return res.status(200).json({ ok: true, restocked_to: DAILY_VITRINA_STOCK, ran_at: new Date().toISOString() });
+
+        // Plan A (migration 030) only recomputes the products.*_computed shadow
+        // columns off a stock_movements INSERT trigger -- this PATCH never fires
+        // it, so stock_computed silently drifts from the real `stock` set above.
+        // Record the same reload as a 'load' movement to keep the shadow columns
+        // truthful for when Plan B starts reading them. Best-effort: a failure
+        // here must not turn a successful vitrina restock into an error response.
+        // Dedup id makes a duplicate cron invocation on the same Caracas day a
+        // no-op via Postgrest's ignore-duplicates instead of double-counting.
+        let shadowSynced = false;
+        try {
+            const pastelitos = await db.rawGet('products?select=id&category=eq.pastelitos');
+            if (Array.isArray(pastelitos) && pastelitos.length) {
+                const dayStr = new Date().toLocaleDateString('en-CA', { timeZone: 'America/Caracas' });
+                const movements = pastelitos.map(p => ({
+                    id: `daily-restock-${p.id}-${dayStr}`,
+                    product_id: p.id,
+                    delta: DAILY_VITRINA_STOCK,
+                    type: 'load',
+                    device_id: 'cron-daily-restock',
+                    note: 'Repuesto automático diario de vitrina'
+                }));
+                shadowSynced = await db.post('stock_movements', movements, 'resolution=ignore-duplicates,return=minimal');
+            }
+        } catch (shadowErr) {
+            console.error('daily-restock: stock_movements shadow sync failed:', shadowErr.message);
+        }
+
+        return res.status(200).json({ ok: true, restocked_to: DAILY_VITRINA_STOCK, shadow_synced: shadowSynced, ran_at: new Date().toISOString() });
     } catch (e) {
         return res.status(500).json({ ok: false, error: e.message });
     }
