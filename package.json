@@ -9,6 +9,7 @@
     "test": "node tests/unit.test.js && node tests/build.test.js",
     "lint": "eslint .",
     "generate:qr": "node scripts/generate-qr.js",
+    "vendor:powersync": "npx --yes @powersync/web@2.4.1 copy-assets --output js/powersync/vendor",
     "version": "node scripts/sync-desktop-version.js && git add desktop/package.json",
     "release:web": "npm run build && git push origin HEAD:main",
     "release:desktop": "npm run build && npm --prefix desktop run publish",
