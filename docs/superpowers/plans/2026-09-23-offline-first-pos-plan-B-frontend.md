@@ -351,30 +351,45 @@ ejecutar, no asumirlo de una fecha de spec pasada).
 > `fetchCredentials()` y `uploadData(database)`), no una transcripción de la
 > doc bloqueada.
 
-- [ ] **Step 1: Definir el schema local**
+- [x] **Step 1: Definir el schema local** (`js/powersync/schema.js`) — columnas
+      verificadas contra las migraciones reales, no contra el spec (que
+      estaba desactualizado en varios nombres). `sales`/`expenses`/`debts`/
+      `replenishments` usan `uuid` como PK real en Postgres, no `id` — ver
+      la correccion en `planB-sync-rules.yaml` (alias `uuid AS id` en el
+      sync stream).
 
-  Una tabla por cada una de la Task 1 Step 3 (`products`, `ingredients`,
-  `profiles`, `app_config`, `sales`, `expenses`, `debts`, `debt_payments`,
-  `stock_movements`, `replenishments`, `day_closes`), columnas espejo de
-  Postgres. Referencia de columnas: `supabase/migrations/000_core_tables.sql`
-  + `016b_multi_tenant_locations.sql` + `019_product_cost.sql` +
-  `020_expense_categories.sql` + `025`-`032` (Plan A) + `028` (`voided_at`).
+- [x] **Step 2: Implementar el connector de Supabase** (`js/powersync/connector.js`)
+      — API real verificada contra el conector de referencia de PowerSync
+      (`getNextCrudTransaction()`, `{op, table, id, opData}`,
+      `transaction.complete()`), no contra la doc generica que no la cubre.
 
-- [ ] **Step 2: Implementar el connector de Supabase**
-
-  `fetchCredentials()` devuelve `{endpoint, token}` desde la sesión activa
-  de `SupabaseManager` (reusar `getCurrentSession()`, supabase.js:875).
-  `uploadData(database)` lee el CRUD pendiente local y lo sube a Supabase
-  con las mismas funciones de escritura existentes (`upsertProduct`,
-  `insertSale`, etc.) — o directo vía PostgREST, evaluar cuál da menos
-  duplicación de lógica una vez se vea el CRUD real. RLS de Postgres sigue
-  validando en la subida (spec §8), así que un bug acá no puede escalar
-  privilegios, solo fallar el sync.
-
-- [ ] **Step 3: Bootstrap y arranque**
+- [ ] **Step 3: Bootstrap y arranque — BLOQUEADO, decision de arquitectura pendiente**
 
   Instanciar `PowerSyncDatabase` con storage OPFS (web), conectar el
   connector, llamar `connect()` en el arranque de la app (después de login).
+
+  **Hallazgo (2026-09-26, probado en navegador real, no solo doc):**
+  `@powersync/web` abre su SQLite/OPFS dentro de un `SharedWorker`, y ese
+  worker se construye con una URL relativa al origen desde donde se cargó
+  el paquete — no hay ninguna opción de configuración para cambiarla
+  (confirmado contra la doc oficial). Cargar el paquete desde un CDN (mismo
+  patron que `@supabase/supabase-js` hoy, `cdn.jsdelivr.net/npm/...`, que
+  este proyecto usa porque no tiene bundler) importa el modulo principal sin
+  problema, pero `new SharedWorker(...)` tira `SecurityError` porque el
+  script del worker queda en un origen distinto (el CDN) al de la app.
+  Verificado con un test real: `db.init()` falla ahi mismo, no es teorico.
+
+  Dos caminos reales, ninguno trivial:
+  1. **Vendorizar el paquete completo** (`worker.js` + WASM + el resto de
+     `@powersync/web`) bajo `js/powersync/vendor/`, servido por el mismo
+     origen que la app -- mantiene "sin build step" pero hay que
+     re-vendorizar a mano en cada actualizacion de la libreria.
+  2. **Introducir un paso de build minimo** (ej. esbuild) que resuelva esto
+     de forma sostenible -- primer build real del frontend (hoy solo se
+     sustituyen placeholders), cambia una convencion del proyecto.
+
+  Pausado a pedido de Gustavo para que Gemini lo revise antes de elegir
+  camino -- no es solo una decision tecnica mia.
 
 - [ ] **Step 4: Prueba manual — dev**
 

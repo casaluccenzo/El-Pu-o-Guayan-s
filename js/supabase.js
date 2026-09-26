@@ -884,6 +884,15 @@ async function getCurrentSession() {
     }
 }
 
+// Plan B, Task 3: PowerSyncBackendConnector.uploadData needs to push the
+// local CRUD queue to Supabase through the SAME authenticated session this
+// module already holds (RLS is role-based) -- a second, separately
+// constructed client would start out unauthenticated. Exposes the raw
+// supabase-js client rather than duplicating every table's write logic here.
+function getClient() {
+    return client;
+}
+
 async function getUserProfile(userId) {
     if (!client || !userId) return null;
     try {
@@ -1628,6 +1637,7 @@ window.SupabaseManager = {
     fetchAppConfig,
     upsertAppConfig,
     insertDayClose,
+    getClient,
     subscribeToChanges,
     syncOfflineQueue,
     getDbSupportsLastClose: () => dbSupportsLastClose,

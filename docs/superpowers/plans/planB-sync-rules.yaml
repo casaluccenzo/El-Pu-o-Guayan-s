@@ -35,6 +35,14 @@
 # stock_movements ya no necesita el JOIN contra products (esa distincion
 # pastelitos-vs-resto era solo para la ventana de tiempo, que se elimino) --
 # vuelve a ser un solo stream simple.
+#
+# CORRECCION 2 (Task 3, al escribir schema.js): PowerSync necesita que cada
+# fila sincronizada tenga una columna literalmente llamada "id" -- es la
+# clave con la que identifica la fila en SQLite local. sales/expenses/debts/
+# replenishments usan `uuid` como PK real en Postgres, no `id`. Se alias-ea
+# explicitamente (se mantiene tambien la columna `uuid` original, para no
+# romper el codigo JS existente que la lee por ese nombre). Falta re-Validate
+# y Deploy este archivo actualizado en el dashboard antes de seguir.
 
 config:
   edition: 3
@@ -58,15 +66,15 @@ streams:
 
   sales:
     auto_subscribe: true
-    query: SELECT * FROM sales
+    query: SELECT uuid AS id, uuid, product_id, name, price, timestamp, bcv_rate, cost_at_sale, voided_at, void_reason, location_id FROM sales
 
   expenses:
     auto_subscribe: true
-    query: SELECT * FROM expenses
+    query: SELECT uuid AS id, uuid, description, amount, timestamp, category, currency, bcv_rate, location_id FROM expenses
 
   replenishments:
     auto_subscribe: true
-    query: SELECT * FROM replenishments
+    query: SELECT uuid AS id, uuid, product_id, name, amount, unit, status, timestamp, location_id FROM replenishments
 
   stock_movements:
     auto_subscribe: true
@@ -74,7 +82,7 @@ streams:
 
   debts:
     auto_subscribe: true
-    query: SELECT * FROM debts
+    query: SELECT uuid AS id, uuid, client_name, amount, description, timestamp, location_id FROM debts
 
   debt_payments:
     auto_subscribe: true
