@@ -92,7 +92,7 @@ ejecutar, no asumirlo de una fecha de spec pasada).
 - Produces: una rama git para Plan B, y una decisión explícita y documentada
   sobre la cuenta de PowerSync (cloud gestionado vs. self-hosted, qué plan).
 
-- [ ] **Step 1: Decisión de PowerSync — requiere al dueño del negocio**
+- [x] **Step 1: Decisión de PowerSync — requiere al dueño del negocio**
 
   No es una decisión técnica que el agente pueda tomar solo (como ya pasó
   con crear el proyecto Supabase dev en Plan A, pero un escalón más arriba:
@@ -108,14 +108,14 @@ ejecutar, no asumirlo de una fecha de spec pasada).
     Plan A Task 0: el agente no crea cuentas en servicios de terceros que
     impliquen un compromiso del negocio, salvo pedido explícito).
 
-- [ ] **Step 2: Crear la rama**
+- [x] **Step 2: Crear la rama**
 
   ```bash
   git checkout main && git pull origin main
   git checkout -b feature/offline-first-plan-b
   ```
 
-- [ ] **Step 3: Commit del scaffold**
+- [x] **Step 3: Commit del scaffold**
 
   ```bash
   git commit --allow-empty -m "chore: start offline-first Phase 1 (Plan B)"
@@ -144,7 +144,7 @@ ejecutar, no asumirlo de una fecha de spec pasada).
 > web 2026-09-23), pero **hay que releer la doc oficial al ejecutar esta
 > task**, no copiar esto a ciegas.
 
-- [ ] **Step 1: Crear la publication en el proyecto dev**
+- [x] **Step 1: Crear la publication en el proyecto dev**
 
   Patrón confirmado (PowerSync requiere una `PUBLICATION` sobre las tablas
   que sincroniza):
@@ -173,13 +173,17 @@ ejecutar, no asumirlo de una fecha de spec pasada).
   Aplicar primero a `casa-lucenzo-dev` vía `apply_migration` (MCP Supabase),
   igual criterio de aislamiento que Plan A.
 
-- [ ] **Step 2: Crear el proyecto PowerSync (dashboard, no SQL) y conectarlo al dev**
+- [x] **Step 2: Crear el proyecto PowerSync (dashboard, no SQL) y conectarlo al dev**
 
   Con la decisión de la Task 0 Step 1 ya tomada por el usuario. Configurar
   auth: activar "Use Supabase Auth" en el proyecto PowerSync y pegar el JWT
   secret de `casa-lucenzo-dev` (Supabase → Settings → API).
 
-- [ ] **Step 3: Sync rules — qué baja y con qué filtro**
+- [x] **Step 3: Sync rules — qué baja y con qué filtro** (revisado: el motor
+      real no permite ventanas móviles vía `now()`/parámetros con `>=` — ver
+      cabecera de `docs/superpowers/plans/planB-sync-rules.yaml` para el
+      detalle. Se sincroniza cada tabla completa, sin filtro, por decisión
+      explícita con Gustavo.)
 
   Traducir la tabla del spec §4 a sync rules reales (formato YAML del
   dashboard de PowerSync — confirmar la sintaxis exacta contra la doc al
@@ -193,18 +197,13 @@ ejecutar, no asumirlo de una fecha de spec pasada).
   - `replenishments`: día en curso + 7 días previos.
   - `day_closes`: últimas ~10 filas.
 
-- [ ] **Step 4: Verificación de conexión**
+- [x] **Step 4: Verificación de conexión**
 
   Confirmar en el dashboard de PowerSync que la conexión al proyecto dev
   da "Connection Successful" (o el estado equivalente vigente), y que las
   tablas de la publication aparecen listadas.
 
-- [ ] **Step 5: Commit**
-
-  ```bash
-  git add supabase/migrations/034_powersync_publication.sql docs/superpowers/plans/planB-sync-rules.yaml
-  git commit -m "feat(sync): Postgres publication + PowerSync sync rules (dev)"
-  ```
+- [x] **Step 5: Commit** (`43a74bf`)
 
 ---
 
