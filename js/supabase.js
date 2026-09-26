@@ -1087,6 +1087,35 @@ async function fetchAppConfig() {
     }
 }
 
+// Plan B, Task 2 gate: last_close_at() (migrations 026/030/033) reads
+// MAX(day_closes.closed_at) to know where "today" starts for pastelitos
+// stock. Nothing wrote to this table before -- the day close only ever
+// touched app_config.last_close_time -- so that boundary never advanced and
+// stock_computed (dormant shadow column, migration 030) was drifting upward
+// by +15 every time the daily-restock cron ran. This is additive: it doesn't
+// change what the day close already does, it just also records the same
+// event where the Plan A/B trigger logic looks for it.
+async function insertDayClose(closedAt, deviceId) {
+    if (!client) return;
+    const payload = {
+        id: crypto.randomUUID ? crypto.randomUUID() : 'dc_' + Math.random().toString(36).substring(2) + Date.now().toString(36),
+        closed_at: closedAt,
+        device_id: deviceId || null
+    };
+    try {
+        if (!navigator.onLine) {
+            enqueueOfflineOp('day_closes', 'insert', payload);
+            return;
+        }
+
+        const { error } = await client.from('day_closes').insert(payload);
+        if (error) throw error;
+    } catch (e) {
+        console.error("Supabase insertDayClose failed. Enqueuing offline...", e);
+        enqueueOfflineOp('day_closes', 'insert', payload);
+    }
+}
+
 async function upsertAppConfig(config) {
     if (!client) return;
     // Partial upsert: only touch the columns the caller actually passed.
@@ -1598,6 +1627,7 @@ window.SupabaseManager = {
     upsertIngredient,
     fetchAppConfig,
     upsertAppConfig,
+    insertDayClose,
     subscribeToChanges,
     syncOfflineQueue,
     getDbSupportsLastClose: () => dbSupportsLastClose,

@@ -2067,6 +2067,20 @@ async function closeDayAndResetLogs() {
         }
         window.StorageManager.saveLastCloseTime(nowStr);
 
+        // 1b. Also record the close in day_closes (Plan A/B, migrations 026/030/033).
+        // last_close_at() reads MAX(day_closes.closed_at) to know where "today"
+        // starts for the pastelitos stock calculation; app_config.last_close_time
+        // above doesn't feed that at all. Isolated in its own try/catch like the
+        // BCV refresh below -- the close is already committed by this point, a
+        // failure here must not report a completed close as failed.
+        if (window.SupabaseManager.isConfigured()) {
+            try {
+                await window.SupabaseManager.insertDayClose(nowStr, myDeviceId);
+            } catch (e) {
+                console.warn("Day close committed, but insertDayClose failed.", e);
+            }
+        }
+
         // 2. Clear local arrays
         salesLog = [];
         expenses = [];
