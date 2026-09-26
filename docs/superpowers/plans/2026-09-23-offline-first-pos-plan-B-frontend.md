@@ -304,21 +304,29 @@ ejecutar, no asumirlo de una fecha de spec pasada).
   `supabase/tests/planB_assertions.sql` nuevo (mismo espíritu que
   `planA_assertions.sql`).
 
-- [ ] **Step 3: Gate — aplicar a producción**
+- [ ] **Step 3: Gate — aplicar a producción — BLOQUEADO, no es solo revisar call sites**
 
-  Mismo criterio que Plan A Task 10: correr primero en dev, y **pedir
-  confirmación explícita antes de aplicar a producción** (esta migración,
-  a diferencia de las de Plan A, si algún flujo del frontend todavía no
-  migrado dependiera de escribir `products.max` directo sin pasar por acá,
-  podría generar una carrera de escrituras — repasar cada call site de
-  `updateProductStock` antes de aplicar a prod).
+  Verificado contra producción real (2026-09-26): `day_closes` tiene
+  **0 filas** desde que existe la tabla (23-sep). `last_close_at()` devuelve
+  `-infinity` y nunca avanzó — Task 9 (cierre de jornada inserta en
+  `day_closes`) todavía no está hecha. El cron `api/daily-restock.js`
+  (fix de esta sesión, `3ac1f13`, ya en `main`) inserta un `stock_movements`
+  `load` de +15 cada día; sin que `last_close_at()` avance, el trigger de
+  esta Task sumaría sobre TODO el historial en vez de resetear diariamente
+  — `products.stock` real de pastelitos crecería sin techo (15, 30, 45...)
+  apenas se aplique esta migración a producción. Ya le está pasando a la
+  columna sombra `stock_computed` (invisible hoy porque nada la lee) y se
+  volvería visible/roto en cuanto se prometa a columna real.
 
-- [ ] **Step 4: Commit**
+  **No aplicar a producción hasta que exista un mecanismo real que avance
+  `last_close_at()` allá** — lo más limpio es adelantar la parte de Task 9
+  que inserta en `day_closes` (aunque sea antes que el resto de esa task),
+  o alguna mitigación equivalente. Además, sigue pendiente el chequeo
+  original de call sites de `updateProductStock` (14 en `js/app.js`) una vez
+  resuelto lo anterior.
 
-  ```bash
-  git add supabase/migrations/033_promote_stock_computed.sql supabase/tests/planB_assertions.sql
-  git commit -m "feat(db): promote Plan A shadow columns to the real stock columns"
-  ```
+- [x] **Step 4: Commit** (archivos, verificados en dev — la aplicación a
+      producción sigue bloqueada por el Step 3 de arriba)
 
 ---
 
