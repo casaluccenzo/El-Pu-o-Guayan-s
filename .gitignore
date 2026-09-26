@@ -50,6 +50,9 @@ skills-lock.json
 # Visual brainstorming companion (superpowers)
 .superpowers/
 
+# Gemini (Antigravity) <-> Claude coordination bridge -- local tooling, not app code
+.orchestrator/
+
 # Electron desktop app
 desktop/node_modules/
 desktop/dist/

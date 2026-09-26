@@ -119,7 +119,7 @@ module.exports = [
             // code. Without this, `eslint .` scans their .mjs helpers and
             // drowns real findings under thousands of no-undef errors.
             '.agents/', '.claude/', '.codex/', '.gemini/', '.github/',
-            '.gstack/', '.idea/', '.impeccable/', '.vercel/', '.worktrees/'
+            '.gstack/', '.idea/', '.impeccable/', '.orchestrator/', '.vercel/', '.worktrees/'
         ]
     }
 ];
