@@ -131,6 +131,9 @@ module.exports = [
         ignores: [
             'www/', 'node_modules/', 'whatsapp-session/', 'supabase/.temp/',
             'desktop/dist/', 'desktop/node_modules/',
+            // Vendored third-party build output (js/powersync/vendor/, via
+            // `npx @powersync/web copy-assets`) -- not our code, minified.
+            'js/powersync/vendor/',
             // Every dot-directory is local tooling (editor, AI skills/agents,
             // deploy, worktrees) -- all git-ignored, none of it application
             // code. Without this, `eslint .` scans their .mjs helpers and

@@ -54,6 +54,21 @@
          in sw.js -- the service worker keys its cache by the exact request URL,
          so a stale ?v= here means users keep running old JS. -->
     <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
+    <!-- Plan B: PowerSync's main module comes from the CDN (same pattern as
+         supabase-js right above) -- sw.js already caches any cross-origin
+         request generically, so this is available offline after the first
+         load. Pinned to an exact version deliberately: an unpinned /+esm
+         could float to a new release and silently change behavior.
+         The SQLite worker CANNOT come from a CDN (browsers refuse to
+         construct a SharedWorker from a cross-origin script) -- it's
+         vendored locally under js/powersync/vendor/, see client.js. -->
+    <script type="importmap">
+    {
+        "imports": {
+            "@powersync/web": "https://cdn.jsdelivr.net/npm/@powersync/web@2.4.1/+esm"
+        }
+    }
+    </script>
     <!-- shared.js first: it owns escapeHtml/showToast, used by every module below -->
     <script src="/js/ui/shared.js?v=__APP_VERSION__"></script>
     <script src="/js/storage.js?v=__APP_VERSION__"></script>
@@ -69,6 +84,11 @@
     <script src="/js/audio.js?v=__APP_VERSION__"></script>
     <script src="/js/share.js?v=__APP_VERSION__"></script>
     <script src="/js/agent.js?v=__APP_VERSION__"></script>
+    <!-- connector.js is a classic script (needs window.SupabaseManager,
+         itself not a module) -- client.js (a real ES module, imports from
+         '@powersync/web') reads it back via window.PowerSyncConnector. -->
+    <script src="/js/powersync/connector.js?v=__APP_VERSION__"></script>
+    <script type="module" src="/js/powersync/client.js?v=__APP_VERSION__"></script>
     <script src="/js/ui.js?v=__APP_VERSION__"></script>
     <script src="/js/app.js?v=__APP_VERSION__"></script>
     <script src="/js/desktop.js?v=__APP_VERSION__"></script>

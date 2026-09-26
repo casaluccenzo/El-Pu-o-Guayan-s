@@ -379,30 +379,42 @@ ejecutar, no asumirlo de una fecha de spec pasada).
   script del worker queda en un origen distinto (el CDN) al de la app.
   Verificado con un test real: `db.init()` falla ahi mismo, no es teorico.
 
-  Dos caminos reales, ninguno trivial:
-  1. **Vendorizar el paquete completo** (`worker.js` + WASM + el resto de
-     `@powersync/web`) bajo `js/powersync/vendor/`, servido por el mismo
-     origen que la app -- mantiene "sin build step" pero hay que
-     re-vendorizar a mano en cada actualizacion de la libreria.
-  2. **Introducir un paso de build minimo** (ej. esbuild) que resuelva esto
-     de forma sostenible -- primer build real del frontend (hoy solo se
-     sustituyen placeholders), cambia una convencion del proyecto.
+  **Resuelto (2026-09-26) — Camino 1, con el input de Gemini:**
+  `npx @powersync/web copy-assets --output js/powersync/vendor` es una
+  herramienta OFICIAL del paquete (confirmado contra `npm view`/`--help`
+  antes de correrla, no solo porque Gemini la sugirio) que copia
+  `worker.js` + los WASM a una carpeta local. `PowerSyncDatabase` acepta
+  `database.worker` (string/URL/factory) para apuntar ahi -- esta opcion
+  no aparecia bien documentada en `docs.powersync.com`, se confirmo
+  leyendo el `.d.ts` real del paquete instalado.
 
-  Pausado a pedido de Gustavo para que Gemini lo revise antes de elegir
-  camino -- no es solo una decision tecnica mia.
+  El modulo PRINCIPAL sigue viniendo del CDN (mismo patron que
+  `@supabase/supabase-js`, pinneado a una version exacta via importmap) --
+  no hace falta vendorizarlo tambien: `sw.js` ya cachea cualquier request
+  cross-origin de forma generica (stale-while-revalidate, unica excepcion
+  `supabase.co`), asi que queda disponible offline despues de la primera
+  carga sin cambios adicionales.
 
-- [ ] **Step 4: Prueba manual — dev**
+  Verificado en un navegador real, de punta a punta, incluyendo un `INSERT`
+  + `SELECT` reales contra `window.PowerSyncManager.db` (no solo que
+  importe sin tirar error). Hay un log cosmetico
+  ("[PowerSync]: Caught error while attempting to cleanup triggers
+  SecurityError...") de una rutina interna de `@powersync/shared-internals`
+  separada de la conexion principal -- ya viene atajado por la propia
+  libreria ("Caught error"), no afecta el INSERT/SELECT real. Ver el
+  comentario en `client.js` si reaparece.
 
-  Contra `casa-lucenzo-dev` con datos de `planA_seed.sql`: cargar la página,
-  confirmar en devtools que las tablas locales se poblaron, hacer un INSERT
-  local de prueba y confirmar que llega a Postgres dev.
+- [x] **Step 4: Prueba manual — dev**
 
-- [ ] **Step 5: Commit**
+  Verificado contra el dev server local (no aun contra `casa-lucenzo-dev`
+  con datos reales, eso es cuando se conecte de verdad con Task 4): la
+  pagina carga sin romperse, `window.PowerSyncManager.db` se instancia,
+  `db.init()` corre limpio, y un `INSERT`/`SELECT` de prueba contra la
+  tabla local `products` funciona. Pendiente para cuando haya Tasks 4+:
+  probar con el seed real de `casa-lucenzo-dev` y confirmar que un INSERT
+  local efectivamente sincroniza a Postgres dev (necesita login real).
 
-  ```bash
-  git add js/powersync/ sistema/index.html sw.js
-  git commit -m "feat(sync): PowerSync client bootstrap (schema + Supabase connector)"
-  ```
+- [x] **Step 5: Commit**
 
 ---
 

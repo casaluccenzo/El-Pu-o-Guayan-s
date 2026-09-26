@@ -3402,7 +3402,18 @@ async function handleUserLogin(username, password) {
         
         const mappedRole = matchedUser.role === 'admin' ? 'admin' : (matchedUser.role === 'cocina' ? 'cocina' : 'local');
         applyUserRole(mappedRole);
-        
+
+        // Plan B, Task 3 Step 3: PowerSync needs the Supabase session that
+        // just got created above (fetchCredentials reads it). Best-effort,
+        // fire-and-forget -- login must not wait on the initial sync
+        // handshake, and nothing reads from PowerSync yet (Task 4+), so a
+        // failure here has no user-visible effect today.
+        if (window.PowerSyncManager) {
+            window.PowerSyncManager.connect().catch(e => {
+                console.warn("PowerSync connect() failed after login:", e);
+            });
+        }
+
         window.UIManager.showToast(`🔓 ¡Bienvenido/a, ${matchedUser.name}!`, "fa-solid fa-user-check");
         logActivity("Inicio de Sesión", `Ingreso de ${matchedUser.name} (${matchedUser.username}) al perfil ${mappedRole.toUpperCase()}`);
         return true;

@@ -53,6 +53,11 @@ skills-lock.json
 # Gemini (Antigravity) <-> Claude coordination bridge -- local tooling, not app code
 .orchestrator/
 
+# PowerSync vendored worker/WASM sourcemaps (js/powersync/vendor/, via
+# `npx @powersync/web copy-assets`) -- only useful for debugging minified
+# third-party code, not needed at runtime, and bigger than the files they map.
+js/powersync/vendor/**/*.map
+
 # Electron desktop app
 desktop/node_modules/
 desktop/dist/
