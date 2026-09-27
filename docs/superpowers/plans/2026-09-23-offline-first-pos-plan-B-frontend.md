@@ -349,8 +349,48 @@ ejecutar, no asumirlo de una fecha de spec pasada).
   código ya no existe en esta rama — Task 12 lo retiró — pero
   producción todavía corre el código viejo que sí lo llama).
 
+  **Estado real de producción, confirmado por lectura directa (2026-09-27,
+  después de abrir el PR)** — no por inferencia de `git log` esta vez, el
+  clasificador permitió la lectura al pedirla explícitamente para resolver
+  este gate:
+  - `day_closes`: **0 filas**. `last_close_at()` sigue en `-infinity`.
+  - Migración **033**: NO aplicada. Migración **034** (publication):
+    NO aplicada. Migración **035** (índice): SÍ ya está aplicada, no
+    hace falta re-aplicarla.
+  - `stock_movements`: 29 filas, pero **todas de un único evento** (el
+    backfill de la migración 032, 23-sep) — el trigger de recálculo
+    (030) existe y está activo, pero casi no se ha ejercitado desde
+    entonces.
+  - **Hallazgo aparte, no bloqueante pero real**: `api/daily-restock.js`
+    (ya en `main`, corre por cron de Vercel a las 6am hora Caracas) desde
+    hace un tiempo intenta insertar un `stock_movements` +15/día además
+    del PATCH directo a `products` — pero esa rama viene fallando en
+    silencio (solo loggea el error, nunca se ve): no hay ninguna fila de
+    `stock_movements` después del backfill único del 23-sep. No se
+    investigó más a fondo por no ser parte del alcance de Plan B.
+
+  **Decisión tomada con Gustavo (2026-09-27) — runbook para cuando se
+  haga el deploy de esta rama:**
+  1. **Ya (independiente del deploy, sin riesgo)**: aplicar la migración
+     034 (publication) en el SQL Editor de producción — es inerte por sí
+     sola, no cambia ningún trigger ni dato.
+  2. **En el momento del merge + deploy** (idealmente de madrugada, local
+     cerrado, antes del cron de las 6am):
+     a. Merge de esta rama a `main` + deploy.
+     b. Aplicar la migración 033 en el SQL Editor de producción.
+     c. Sembrar el límite ANTES de que corra cualquier cron o venta real
+        — insertar una fila en `day_closes` a mano, o hacer un cierre real
+        desde la app ya actualizada:
+        ```sql
+        INSERT INTO day_closes (id, closed_at, device_id)
+        VALUES (gen_random_uuid()::text, now(), 'deploy-seed');
+        ```
+     d. Confirmar que `products.stock`/`initial_stock`/`max` de pastelitos
+        quedan en 0 antes de que abra el local.
+  3. Recién entonces arrancar la Task 17.
+
 - [x] **Step 4: Commit** (archivos, verificados en dev — la aplicación a
-      producción sigue bloqueada por el Step 3 de arriba)
+      producción queda pendiente, con runbook acordado arriba)
 
 ---
 
@@ -1772,16 +1812,13 @@ ejecutar, no asumirlo de una fecha de spec pasada).
 > Esta task ya no es código: es desplegar, esperar, y comparar datos reales
 > en producción/staging, algo que le corresponde a Gustavo, no a un agente.
 >
-> **⚠️ Bloqueador real sin resolver, encontrado al releer Task 2 antes de
-> cerrar la rama (2026-09-27), NO cubierto por Gemini ni por el trabajo de
-> código: las migraciones 033 (columnas reales) y 034 (publication de
-> PowerSync) nunca se aplicaron a producción — solo a `casa-lucenzo-dev`
-> (confirmado por `git log`, ver la nota completa en la Task 2, Step 3).
-> Sin 034 en producción, PowerSync no tiene nada de dónde sincronizar ahí:
-> el modo sombra de este Step no puede arrancar contra producción tal cual
-> está hoy. Resolver el gate de la Task 2 (y decidir el orden
-> migraciones-vs-deploy con Gustavo) es un prerequisito real de esta task,
-> no un detalle aparte.**
+> **⚠️ Bloqueador real, encontrado al releer Task 2 antes de cerrar la
+> rama (2026-09-27): las migraciones 033 (columnas reales) y 034
+> (publication de PowerSync) nunca se aplicaron a producción — confirmado
+> por lectura directa de producción, no solo por `git log`. Runbook
+> acordado con Gustavo ya está en la Task 2, Step 3 (034 ya mismo, 033 +
+> sembrar `day_closes` en el momento exacto del deploy). No arrancar este
+> Step hasta completar ese runbook.**
 
 **Files:** ninguno (operación).
 
