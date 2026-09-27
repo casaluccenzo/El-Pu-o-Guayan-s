@@ -1617,10 +1617,123 @@ ejecutar, no asumirlo de una fecha de spec pasada).
   verifica: ninguna venta se pierde, el stock converge a la resta correcta,
   el saldo de la deuda converge bien.
 
-- [ ] **Step 1: Decidir automatizado vs. manual documentado, con el usuario si hace falta**
-- [ ] **Step 2: Implementar**
-- [ ] **Step 3: Correr y confirmar convergencia**
-- [ ] **Step 4: Commit**
+- [x] **Step 1: Decidir automatizado vs. manual documentado, con el usuario si hace falta**
+
+  Discutido con Gemini antes de escribir código (el plan mismo deja esta
+  decisión abierta). Diagnóstico técnico, verificado no solo teorizado:
+  - `@powersync/web` necesita navegador real (`SharedWorker`, OPFS/IndexedDB,
+    WASM) — correrlo en Node puro requeriría `@powersync/node`, que trae
+    dependencias nativas C++ de SQLite que este proyecto no tiene.
+  - Dos pestañas comunes del mismo origen NO son dos dispositivos aislados
+    — comparten un solo `SharedWorker` y una sola base SQLite local.
+    **Confirmado empíricamente, no en teoría**: durante la verificación de
+    Task 13 encontré que un `insertSale` de diagnóstico llegó a
+    Postgres real desde una pestaña que reportaba `connected:false`,
+    porque otra pestaña de fondo — completamente olvidada, de pruebas de
+    tasks anteriores — sostenía la conexión real compartida por el mismo
+    worker.
+
+  Decisión (hoy híbrida, la mitad automatizada quedó lista, la mitad manual
+  quedó documentada pero SIN ejecutar — ver Step 3):
+  1. **Automatizado**: lo que realmente tiene que converger cuando dos
+     dispositivos reconectan no es la mecánica interna de PowerSync (eso es
+     responsabilidad de la librería, no de esta app) sino el modelo de datos
+     de Postgres — `stock_movements` + `recompute_product_stock()`,
+     `debt_payments` + el saldo, `day_closes` + `last_close_at()`. Un script
+     Node simula exactamente lo que subirían las colas CRUD de dos
+     dispositivos, contra Postgres real, sin necesitar navegador.
+  2. **Manual documentado**: lo que el script automatizado NO puede tocar
+     (la cola CRUD de PowerSync en sí, su manejo de reconexión) queda para
+     una pasada manual con dos perfiles de navegador reales — sin
+     automatizar, documentado explícitamente como pendiente (ver Step 3).
+
+- [x] **Step 2: Implementar**
+
+  `tests/powersync-convergence.test.js` (nuevo) — sin dependencias nuevas:
+  siguiendo la convención ya establecida en `lib/bot-shared.js`
+  (`SupabaseRest`, ya que `@supabase/supabase-js` ni siquiera es una
+  dependencia de npm en este proyecto, se carga solo por CDN en el
+  navegador), habla contra la REST API de PostgREST con `fetch` plano.
+
+  Decisión de diseño sobre autenticación: en vez de pedir una
+  `SUPABASE_SERVICE_ROLE_KEY` (bypassa RLS por completo), el script hace un
+  login real (`/auth/v1/token?grant_type=password`) con un usuario de
+  prueba y usa ESE token para cada insert — pasa por las mismas policies
+  RLS (001/025/026/027) que un dispositivo real después de loguearse. Más
+  fiel a lo que se está verificando, y evita que este script necesite
+  guardar el secreto más peligroso del proyecto.
+
+  Guardas de seguridad: rechaza correr sin `SUPABASE_URL`/`SUPABASE_ANON_KEY`/
+  credenciales, y rechaza correr contra cualquier URL que no contenga el
+  ref de `casa-lucenzo-dev` salvo confirmación explícita
+  (`CONVERGENCE_TEST_CONFIRM_DEV=yes`) — nunca debe poder correr contra
+  producción por accidente. No se agregó a `npm test` (necesita red +
+  credenciales reales, lo opuesto a la suite hermética) — corre aparte,
+  `npm run test:convergence` (nuevo script en `package.json`).
+
+  Simula: dos `device_id` (`tablet-1`/`tablet-2`) insertando
+  intercalado/desordenado — 2 ventas + sus `stock_movements` (delta -2 y
+  -3) sobre un producto pastelito de prueba, cruzando un `day_closes` real
+  de por medio; 2 abonos ($10.10 y $5.00) a la misma deuda de prueba.
+  Limpia todo lo que crea al final (`finally`), salvo `day_closes` — ver el
+  hallazgo del Step 3.
+
+- [x] **Step 3: Correr y confirmar convergencia**
+
+  **Mitad automatizada — corrida real contra `casa-lucenzo-dev`, no
+  simulada:**
+
+  Primera corrida falló (a propósito lo dejo documentado, no lo escondo):
+  `max` dio `999` en vez de `20`. No era un bug de `recompute_product_stock`
+  sino un error de orden en el test mismo — insertaba el movimiento "viejo,
+  antes del cierre" ANTES de crear el `day_closes` de la prueba, así que
+  `last_close_at()` en ese instante todavía apuntaba a cierres reales de
+  horas antes (de tasks anteriores en este mismo proyecto dev compartido),
+  y el movimiento de 999 quedó contado como "posterior al cierre" bajo esa
+  frontera vieja — y `GREATEST()` nunca lo bajó después (por diseño, Task 9).
+  Reordenado: el `day_closes` de la prueba se inserta PRIMERO, así queda
+  como el máximo global de inmediato, y recién entonces el movimiento viejo
+  (con timestamp antes de ese cierre) se inserta. Segunda corrida: las 3
+  suites verdes contra Postgres real.
+
+  Segundo hallazgo real durante la limpieza: `day_closes` no tiene policy
+  de `DELETE` (`001`/`026` — es append-only a propósito, mismo diseño que
+  el resto de Plan B). El primer intento de borrar la fila de prueba fallaba
+  en silencio (RLS deniega el DELETE, 0 filas afectadas, sin error) y quedó
+  huérfana. Corregido: el script ya no intenta borrar `day_closes` — lo
+  documenta como una fila permanente esperada (igual que un cierre real),
+  no basura a limpiar. Las filas huérfanas de las corridas de prueba
+  durante este debugging se purgaron a mano vía una conexión privilegiada
+  (no a través del script, que nunca tuvo ni necesitó esa clase de acceso).
+
+  Estado final verificado con SQL directo: cero filas de prueba
+  (`conv-%`) quedan en `products`/`stock_movements`/`day_closes`/`sales`/
+  `debts`/`debt_payments`.
+
+  **Mitad manual — NO ejecutada esta sesión, documentado en vez de fingirla:**
+
+  Requiere la `powerSyncUrl` real de `casa-lucenzo-dev`, que no está
+  disponible en este entorno (mismo bloqueo ya encontrado en Tasks 13/14).
+  Pendiente para cuando el usuario la tenga a mano:
+  1. Abrir la app en dos perfiles de navegador realmente separados (dos
+     perfiles de Chrome, o un perfil normal + uno invitado — **no** dos
+     pestañas del mismo perfil, comparten el `SharedWorker`, ver Step 1).
+  2. En cada uno, loguearse, cortar la red (DevTools → Network → Offline, o
+     desconectar Wi-Fi), y hacer una acción distinta: Dispositivo 1 vende un
+     producto, Dispositivo 2 anota un abono a una deuda (o vende el mismo
+     producto, para forzar la resta a converger sobre el mismo stock).
+  3. Reconectar ambos y confirmar en el badge de Task 13 que ambos llegan a
+     "sincronizado" sin error.
+  4. Confirmar contra Postgres real (o recargando ambas pestañas) que
+     ninguna venta se perdió y que el stock/saldo coincide con lo que la
+     mitad automatizada de este Step ya probó que el trigger calcula bien.
+
+- [x] **Step 4: Commit**
+
+  `npm run lint`: 0 errores. `npm test` (suite hermética): sin cambios,
+  sigue 100% verde — este script deliberadamente no se sumó ahí.
+  `npm run test:convergence` contra `casa-lucenzo-dev` real: 3/3 suites
+  verdes.
 
 ---
 
