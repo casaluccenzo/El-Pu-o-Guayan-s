@@ -418,11 +418,28 @@ ejecutar, no asumirlo de una fecha de spec pasada).
      pre-cutover (pastelitos 0, bebidas 119, dulces 65 — sin crecimiento
      descontrolado ni ceros espurios).
 
-  **Nota para la Task 17**: como se hizo el cutover completo hoy mismo
-  (no se esperó al cierre de jornada de la noche, decisión de Gustavo —
-  ver el intercambio en la sesión), `day_closes` sigue en 0 filas hasta el
-  próximo cierre real. Eso es esperado y no bloquea nada — la fórmula de
-  pastelitos ya está devolviendo 0 correctamente (nada que restar todavía).
+  **Nota para la Task 17**: como se hizo el cutover completo hoy mismo (no
+  se esperó al cierre de jornada de la noche, decisión de Gustavo), y el
+  local no abre hoy tampoco (así que tampoco iba a haber cierre real esta
+  noche), `day_closes` se sembró a mano en vez de esperar:
+  ```sql
+  INSERT INTO day_closes (id, closed_at, device_id)
+  VALUES (gen_random_uuid()::text, now(), 'manual-seed-no-abre-hoy');
+  ```
+  Verificado sin efecto sobre el stock actual (pastelitos/bebidas/dulces
+  idénticos antes y después). Motivo: sin esto, el cron `daily-restock`
+  de las 6am (corre todos los días, abra o no el local) hubiera seguido
+  sumando sobre `-infinity` — exactamente el riesgo original de este gate,
+  ahora que la 033 ya está activa.
+
+  **Además, se encontró y arregló** (mismo día, antes del primer cron real
+  post-cutover) que `api/daily-restock.js` seguía haciendo un `PATCH`
+  directo a `products` además de intentar el `stock_movements` — con la
+  033 activa, ese `PATCH` compite con el trigger en vez de coexistir con
+  él como antes (cuando solo tocaba la columna sombra dormida). Reescrito
+  para que solo inserte el movimiento y deje que el trigger sea el único
+  que escribe `stock`/`initial_stock`/`max`, igual que el resto de la app
+  desde Task 6. Ver commit `a13a44e`.
 
 - [x] **Step 4: Commit** (archivos verificados en dev + aplicados a
       producción hoy — ver el detalle de ejecución arriba)
@@ -1847,39 +1864,55 @@ ejecutar, no asumirlo de una fecha de spec pasada).
 > Esta task ya no es código: es desplegar, esperar, y comparar datos reales
 > en producción/staging, algo que le corresponde a Gustavo, no a un agente.
 >
-> **✅ Bloqueador resuelto (2026-09-27).** Merge a `main` + deploy +
-> migraciones 033/034 + backfill correctivo, todo ejecutado y verificado
-> el mismo día — ver el detalle completo en la Task 2, Step 3. `main` está
-> en producción (`dpl_C5wcXSdgqjkddLTzf7jZ4PXFo27n`) con PowerSync
-> publication activa y las columnas reales de `products` mantenidas por
-> el trigger. Ya se puede arrancar este Step cuando Gustavo lo decida.
+> **⚠️ Superada por los hechos (2026-09-27) — no se ejecutó como estaba
+> planeada, y hay que ser honestos con eso en vez de tildarla como si
+> hubiera pasado.** El plan original preveía un preview aparte, ~1 semana
+> comparando datos sombra-vs-real, ANTES de tocar producción de verdad. En
+> cambio, a pedido explícito de Gustavo ("dejemos todo listo para hoy"), se
+> mergeó `feature/offline-first-plan-b` directo a `main` y se desplegó a
+> producción real para TODOS los dispositivos el mismo día — sin período de
+> sombra, sin tablet piloto. Detalle completo del cutover (migraciones
+> 033/034, backfill correctivo, verificación) en la Task 2, Step 3.
+>
+> Consecuencia: el primer uso real (cuando el local reabra) es, de hecho, la
+> prueba que este Step y la Task 18 iban a proveer — sin la validación
+> gradual que el plan quería. Vale la pena que Gustavo avise cuando reabra
+> para revisar en vivo la primera venta y el primer cierre de jornada real
+> bajo el código nuevo.
 
 **Files:** ninguno (operación).
 
 **Interfaces:**
-- Produces: el build de `feature/offline-first-plan-b` desplegado en un
-  preview aparte (Vercel preview de la rama, o un subdominio de staging),
-  con PowerSync sincronizando en segundo plano, mientras la app real de
-  producción sigue con el código de hoy sin tocar. ~1 semana, comparando que
-  los datos coincidan.
+- Produces (según el plan original, no lo que terminó pasando): el build
+  de `feature/offline-first-plan-b` desplegado en un preview aparte (Vercel
+  preview de la rama, o un subdominio de staging), con PowerSync
+  sincronizando en segundo plano, mientras la app real de producción sigue
+  con el código de hoy sin tocar. ~1 semana, comparando que los datos
+  coincidan.
 
-- [ ] **Step 1: Deploy a preview** — pendiente (Gustavo)
-- [ ] **Step 2: Comparación diaria de datos (sombra vs. real) — mismo espíritu que Plan A Task 10** — pendiente (Gustavo)
-- [ ] **Step 3: Reporte de resultado — requiere aprobación explícita del usuario para pasar a la Task 18** — pendiente (Gustavo)
+- [x] **Step 1: Deploy a preview** — no se hizo así; se desplegó directo a
+      producción real (ver la nota de arriba)
+- [ ] **Step 2: Comparación diaria de datos (sombra vs. real) — mismo espíritu que Plan A Task 10** — ya no aplica tal cual (no hay entorno sombra separado); reemplazado por monitoreo activo del primer uso real
+- [ ] **Step 3: Reporte de resultado — requiere aprobación explícita del usuario para pasar a la Task 18** — pendiente (Gustavo), en base al primer uso real en vez de una semana de sombra
 
 ---
 
 ## Task 18: Rollout — una tablet real (spec §10, paso 3) y luego el resto
 
-> **Estado: pendiente de ejecución operacional por parte de Gustavo**, y
-> bloqueada por la aprobación de la Task 17 (Step 3) antes de empezar.
+> **Estado: también superada por los hechos (2026-09-27).** El plan preveía
+> una tablet piloto primero, 1 semana, y recién después el resto — hoy TODAS
+> las tablets ya están corriendo el código nuevo (deploy directo a
+> producción, ver Task 17). No hay "el resto" que falte migrar; el código
+> viejo ya no corre en ningún dispositivo. Lo que sigue vigente de esta task
+> es el espíritu del monitoreo: estar atento al primer uso real en cada
+> dispositivo, no la secuencia gradual tal como estaba escrita.
 
 **Files:** ninguno (operación).
 
 **Interfaces:**
-- Produces: una tablet de producción real corriendo el build nuevo 1
-  semana; si sale limpio, el resto de las tablets; recién ahí se retira el
-  código viejo definitivamente.
+- Produces (según el plan original, no lo que terminó pasando): una tablet
+  de producción real corriendo el build nuevo 1 semana; si sale limpio, el
+  resto de las tablets; recién ahí se retira el código viejo definitivamente.
 
 - [ ] **Step 1: Elegir la tablet piloto, con el usuario** — pendiente (Gustavo)
 - [ ] **Step 2: 1 semana de operación real, monitoreo activo** — pendiente (Gustavo)
