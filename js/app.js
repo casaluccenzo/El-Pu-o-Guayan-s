@@ -2103,19 +2103,26 @@ async function closeDayAndResetLogs() {
 
         // 4. Reset showcase products' stock: Pastelitos reset to 0, Packaged items (bebidas, dulces) keep their actual remaining stock
         //
-        // Plan B, Task 9: this no longer persists anything to Postgres.
-        // insertDayClose() above (Step 1b) is what actually moves the real
-        // boundary -- trg_day_close_recompute (migration 030) fires on that
-        // INSERT and recalculates every product's stock/initial_stock/max
-        // itself, straight from stock_movements, the same formula this loop
-        // used to hand-replicate with a direct updateProductStock() write.
-        // Calling that here too would race the trigger over the same
-        // columns (the exact double-write conflict Task 6 was about) -- but
-        // dropping the in-memory mutation entirely isn't safe either: the
-        // trigger only runs once insertDayClose's upload actually reaches
-        // Postgres, and this app has to work offline for a full day (spec
-        // R1). Keeping this pure local assignment is what makes Cocina see
-        // the reset vitrina immediately even before the close has synced.
+        // Plan B, Task 9: stock/initial_stock no persisten nada acá.
+        // insertDayClose() (Step 1b) es lo que mueve la frontera real --
+        // trg_day_close_recompute (migración 030) recalcula esas dos columnas
+        // solo, straight from stock_movements, la misma fórmula que este loop
+        // replicaba a mano con un updateProductStock() directo. Repetirlo acá
+        // competiría con el trigger por las mismas columnas (el mismo
+        // conflicto de doble escritura de Task 6) -- pero sacar la mutación
+        // en memoria por completo tampoco es seguro: el trigger recién corre
+        // cuando el INSERT de insertDayClose efectivamente sube, y esta app
+        // tiene que poder operar offline un día entero (spec R1). Esta
+        // asignación pura en memoria es lo que hace que Cocina vea la vitrina
+        // en cero de inmediato, incluso antes de que el cierre sincronice.
+        // (fetchProducts, más abajo en supabase.js, calcula lo mismo en vivo
+        // para que sobreviva un F5/recarga offline -- hallazgo real de
+        // Gemini, ver Task 9 en el plan.)
+        //
+        // `max` sí necesita seguir escribiéndose directo: a diferencia de
+        // stock/initial_stock, el trigger solo puede CRECER ese techo
+        // (GREATEST), nunca bajarlo -- sin este write explícito, "resetea con
+        // el día" queda roto en TODOS los casos, no solo offline.
         products.forEach(p => {
             const cat = p.category || (window.StorageManager ? window.StorageManager.getProductCategory(p) : 'pastelitos');
             if (cat === 'pastelitos') {
@@ -2125,6 +2132,9 @@ async function closeDayAndResetLogs() {
                 // Left standing it accumulated, and Cocina kept asking for
                 // batches nobody had loaded.
                 p.max = 0;
+                if (window.SupabaseManager.isConfigured()) {
+                    window.SupabaseManager.resetPastelitoCapacity(p.id);
+                }
             } else {
                 // Keep actual remaining stock for drinks/sweets
                 p.initial_stock = p.stock || 0;

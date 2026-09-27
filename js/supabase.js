@@ -409,7 +409,45 @@ async function fetchProducts() {
     const localDb = getLocalDb();
     if (localDb) {
         try {
-            const rows = await localDb.getAll('SELECT * FROM products ORDER BY name');
+            // Plan B, Task 9 follow-up (Gemini, verificado): pastelitos.stock/
+            // initial_stock viven en la columna de products, pero esa columna
+            // solo la actualiza el trigger de Postgres (recompute_product_stock)
+            // cuando el INSERT de day_closes efectivamente llega a subir. Si el
+            // dispositivo cierra jornada offline y recarga la página ANTES de
+            // reconectar, la fila local de products nunca se tocó -- el stock
+            // de ayer "resucita" en pantalla hasta que sincroniza. La mutación
+            // optimista en memoria de closeDayAndResetLogs no sobrevive un
+            // reload (es un array de JS, no algo persistido), así que hace
+            // falta calcularlo en vivo acá, espejando la MISMA fórmula del
+            // trigger (migración 030, rama 'pastelitos') contra las tablas
+            // locales -- que sí están completas y actualizadas al instante
+            // via PowerSync, sin depender de ningún trigger. julianday(), no
+            // comparación de string: un movimiento insertado local puede
+            // quedar en formato "...Z" (JS) mientras day_closes.closed_at ya
+            // sincronizó de vuelta en formato Postgres (ver el mismo hallazgo
+            // en Task 7, voidSalesByTimestamp).
+            const rows = await localDb.getAll(`
+                SELECT
+                    p.id, p.name, p.min, p.max, p.unit, p.price, p.category, p.updated_at,
+                    p.cost, p.location_id, p.stock_computed, p.initial_stock_computed, p.max_computed,
+                    CASE WHEN p.category = 'pastelitos' THEN
+                        COALESCE((
+                            SELECT SUM(sm.delta) FROM stock_movements sm
+                            WHERE sm.product_id = p.id
+                              AND julianday(sm.created_at) > COALESCE((SELECT julianday(MAX(closed_at)) FROM day_closes), -1e18)
+                        ), 0)
+                    ELSE p.stock END AS stock,
+                    CASE WHEN p.category = 'pastelitos' THEN
+                        COALESCE((
+                            SELECT SUM(sm.delta) FROM stock_movements sm
+                            WHERE sm.product_id = p.id
+                              AND julianday(sm.created_at) > COALESCE((SELECT julianday(MAX(closed_at)) FROM day_closes), -1e18)
+                              AND sm.type = 'load'
+                        ), 0)
+                    ELSE p.initial_stock END AS initial_stock
+                FROM products p
+                ORDER BY p.name
+            `);
             return rows.map(mapProductRow);
         } catch (e) {
             console.error("Error fetching products from PowerSync local DB:", e);
@@ -695,6 +733,41 @@ async function updateProductStock(id, stock, max, initialStock) {
     } catch (e) {
         console.error("Supabase updateProductStock failed. Enqueuing offline...", e);
         enqueueOfflineOp('products', 'update_stock', payload, 'id', id);
+    }
+}
+
+// Plan B, Task 9 follow-up (encontrado por Gemini + análisis propio, no
+// estaba en el plan original): `max` es un techo que el trigger de Postgres
+// (recompute_product_stock, migración 030) solo puede CRECER --
+// `GREATEST(initial_stock, max actual)`, nunca lo achica. Sacar el
+// `updateProductStock(id, 0, 0, 0)` de `closeDayAndResetLogs` (como hizo el
+// primer intento de Task 9) resolvía el conflicto de doble escritura para
+// stock/initial_stock (esos SÍ se derivan enteros de stock_movements, con
+// razón Task 6 dejó de escribirlos directo) pero rompía el reset de `max`
+// por completo -- ningún mecanismo en Postgres lo vuelve a bajar a 0 solo.
+// Esta función existe solo para esa columna puntual, local-first para que
+// sobreviva un reload offline igual que cualquier otra escritura de Task 5+.
+async function resetPastelitoCapacity(id) {
+    const localDb = getLocalDb();
+    if (localDb) {
+        try {
+            await localDb.execute('UPDATE products SET max = 0 WHERE id = ?', [id]);
+        } catch (e) {
+            console.error("PowerSync local resetPastelitoCapacity failed:", e);
+        }
+        return;
+    }
+    if (!client) return;
+    try {
+        if (!navigator.onLine) {
+            enqueueOfflineOp('products', 'update_stock', { max: 0 }, 'id', id);
+            return;
+        }
+        const { error } = await client.from('products').update({ max: 0 }).eq('id', id);
+        if (error) throw error;
+    } catch (e) {
+        console.error("Supabase resetPastelitoCapacity failed. Enqueuing offline...", e);
+        enqueueOfflineOp('products', 'update_stock', { max: 0 }, 'id', id);
     }
 }
 
@@ -2151,6 +2224,7 @@ window.SupabaseManager = {
     updatePedidoStatus,
     upsertProduct,
     updateProductStock,
+    resetPastelitoCapacity,
     deleteProduct,
     insertStockMovement,
     getPendingStockMovementProductIds,

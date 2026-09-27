@@ -996,6 +996,54 @@ ejecutar, no asumirlo de una fecha de spec pasada).
   una consecuencia natural del modelo append-only ya construido en
   Tasks 2/3.
 
+- [x] **Step 3b: Hallazgo real de Gemini — F5/recarga offline tras un cierre, más un segundo bug propio encontrado al investigarlo**
+
+  Gemini señaló, revisando el Step 1: la mutación optimista en memoria
+  (`p.stock = 0`) no sobrevive un reload -- es un array de JS, no algo
+  persistido. Si el cajero cierra la jornada offline y recarga la página (o
+  abre el navegador al día siguiente) ANTES de reconectar,
+  `loadAllDataFromSupabase()` vuelve a leer `products` de la tabla local de
+  PowerSync, que el trigger de Postgres todavía no tocó (no corre hasta que
+  `insertDayClose` sube) -- los pastelitos "resucitan" con el stock de ayer
+  hasta reconectar. `getPendingStockMovementProductIds()` (Task 6) no
+  protege este caso: solo mira la cola de `stock_movements` pendientes, no
+  `day_closes`.
+
+  Al investigar la fórmula que Gemini propuso replicar en SQL, encontré un
+  segundo problema, más grave porque no es solo offline: **`max` había
+  dejado de resetear en TODOS los casos**, incluso online. El trigger
+  (`recompute_product_stock`, migración 030) calcula
+  `max = GREATEST(initial_stock, max actual)` -- una fórmula que solo puede
+  CRECER max, nunca bajarlo. Sacar el `updateProductStock(id, 0, 0, 0)` del
+  Step 1 arregló el conflicto de doble escritura para stock/initial_stock
+  (correcto, esos sí derivan enteros de `stock_movements`), pero se llevó
+  puesto el único mecanismo que alguna vez baja `max` a 0. Sin ese write
+  directo, la capacidad de la vitrina quedaba acumulando para siempre otra
+  vez -- exactamente el bug que el comentario original decía prevenir.
+
+  Dos arreglos, cada uno del tamaño del problema real (no una sola solución
+  para ambos, porque son de naturaleza distinta):
+  - `resetPastelitoCapacity(id)` (`js/supabase.js`, nueva, local-first):
+    unico write directo que sigue haciendo falta, SOLO para `max` -- no para
+    stock/initial_stock, que Task 6 correctamente dejó de escribir directo.
+  - `fetchProducts()` (rama local): para categoría `pastelitos`, en vez de
+    leer `products.stock`/`initial_stock` de la columna, las calcula en vivo
+    con la misma fórmula del trigger contra `stock_movements`/`day_closes`
+    locales (`julianday()`, no comparación de string -- mismo hallazgo que
+    Task 7). Esto la hace inmune a si el trigger ya corrió o no: correcta
+    aunque el cierre siga sin subir. `max`/`stock_computed`/etc. no se
+    tocaron -- ahí sí conviene seguir confiando en lo que Postgres calculó,
+    porque `resetPastelitoCapacity` es local-first y sobrevive un reload
+    igual que cualquier otra escritura de Task 5+.
+
+  Verificado en `casa-lucenzo-dev`: `resetPastelitoCapacity` confirmado con
+  lectura directa a Postgres (max 30 → 0). El escenario exacto de Gemini
+  reproducido a mano -- se insertó una fila de `day_closes` puramente local
+  (sin pasar por `insertDayClose`, para controlar el timing) dejando la
+  columna `products.stock` intacta (25, sin tocar), y `fetchProducts()`
+  igual devolvió `stock: 0` -- confirma que el cálculo en vivo funciona
+  independientemente de si el trigger corrió.
+
 - [x] **Step 4: Commit**
 
 ---
