@@ -80,75 +80,17 @@ if (!myDeviceId) {
     localStorage.setItem('casa_lucenzo_device_id', myDeviceId);
 }
 
-// ================= SELF-HEALING SENTINEL & OFFLINE QUEUE ENGINE =================
-const OFFLINE_QUEUE_KEY = 'casa_lucenzo_offline_queue';
-
-function getOfflineQueue() {
-    try {
-        const saved = localStorage.getItem(OFFLINE_QUEUE_KEY);
-        return saved ? JSON.parse(saved) : [];
-    } catch(e) {
-        return [];
-    }
-}
-
-function addToOfflineQueue(actionType, payload) {
-    try {
-        const queue = getOfflineQueue();
-        queue.push({ id: Date.now() + '_' + Math.random().toString(36).substring(2,6), actionType, payload, createdAt: new Date().toISOString() });
-        localStorage.setItem(OFFLINE_QUEUE_KEY, JSON.stringify(queue));
-        if (typeof updateOfflineStatusUI === 'function') updateOfflineStatusUI();
-    } catch(e) {
-        console.error("Self-Healing Queue: Failed to save offline item", e);
-    }
-}
-
-async function processOfflineQueue() {
-    const queue = getOfflineQueue();
-    if (queue.length === 0) {
-        if (typeof updateOfflineStatusUI === 'function') updateOfflineStatusUI();
-        return;
-    }
-    if (!window.SupabaseManager.isConfigured()) return;
-
-    console.log(`Self-Healing: Processing ${queue.length} offline queued items...`);
-    const remaining = [];
-    for (const item of queue) {
-        try {
-            if (item.actionType === 'insertSales' || item.actionType === 'upsertSales') {
-                await window.SupabaseManager.upsertSales(item.payload);
-            } else if (item.actionType === 'updateStock') {
-                await window.SupabaseManager.updateProductStock(item.payload.id, item.payload.stock);
-            } else {
-                // Not one of this queue's own shapes -- most likely an item
-                // queued by enqueueOfflineOp() in js/supabase.js, which
-                // shares this exact localStorage key under a different
-                // schema ({table, action, data, ...} vs. this queue's
-                // {actionType, payload, ...}). Keep it instead of silently
-                // dropping it: this loop used to overwrite the whole key
-                // with only what it recognized, wiping out that other
-                // queue's still-pending (and possibly not-yet-synced) items
-                // every time this ran.
-                remaining.push(item);
-            }
-        } catch(e) {
-            console.warn("Self-Healing Queue item retry deferred:", item, e);
-            remaining.push(item);
-        }
-    }
-    localStorage.setItem(OFFLINE_QUEUE_KEY, JSON.stringify(remaining));
-    if (typeof updateOfflineStatusUI === 'function') updateOfflineStatusUI();
-}
+// ================= SELF-HEALING SENTINEL =================
 
 /**
- * Manual "Sincronizar y Limpiar" action for the apertura/cierre routine.
- * Forces a real sync attempt on both offline queues first -- never clears
- * blindly -- and only after that attempt still leaves something stuck does
- * it offer to discard it, showing exactly what and asking to confirm. This
- * is how the "La guaira" account kept resurrecting on 2026-08-14: a device
- * had an old queued write that nothing ever forced to either sync or clear,
- * so it kept replaying itself. Finishes by dropping this device's cached
- * app code so it's always running what's actually deployed.
+ * Manual "Limpiar Caché" action for the apertura/cierre routine. PowerSync
+ * owns write persistence and retry now (Plan B, Task 12 -- there is no
+ * client-side queue left to sync), so this no longer forces a sync attempt.
+ * What's left, still genuinely useful on its own: surface + let an admin
+ * discard sales this device quarantined (found missing from the server with
+ * nothing to explain the gap -- see the reconciliation note in
+ * loadAllDataFromSupabase), then drop this device's cached app code so it's
+ * always running what's actually deployed.
  */
 async function handleCleanOfflineCache() {
     const btn = document.getElementById('btn-clean-offline-cache');
@@ -157,23 +99,9 @@ async function handleCleanOfflineCache() {
 
     try {
         if (!navigator.onLine) {
-            window.UIManager.showToast("📡 Sin conexión: conectate a internet antes de sincronizar.", "fa-solid fa-wifi-slash");
+            window.UIManager.showToast("📡 Sin conexión: conectate a internet para traer la última versión.", "fa-solid fa-wifi-slash");
             return;
         }
-
-        window.UIManager.showToast("⏳ Sincronizando pendientes...", "fa-solid fa-hourglass-half");
-
-        // Sequential, not parallel -- running both at once is the exact race
-        // that let mismatched-format items clobber each other in the first
-        // place (fixed separately, but no reason to still race them here).
-        if (window.SupabaseManager.isConfigured()) {
-            await window.SupabaseManager.syncOfflineQueue();
-        }
-        await processOfflineQueue();
-
-        const stuckQueue = getOfflineQueue();
-        const deadLetterRaw = localStorage.getItem('casa_lucenzo_offline_queue_failed');
-        const deadLetter = deadLetterRaw ? JSON.parse(deadLetterRaw) : [];
 
         // Sales this device set aside because the server no longer had them and
         // nothing explained why. Surfaced here rather than left to rot: it is
@@ -194,33 +122,8 @@ async function handleCleanOfflineCache() {
                 logActivity("Descarte de Ventas en Cuarentena", `Se descartaron ${quarantined.length} venta(s) apartadas por $${total.toFixed(2)} tras revisión manual del administrador.`);
                 window.StorageManager.clearQuarantinedSales();
             }
-        }
-
-        if (stuckQueue.length === 0 && deadLetter.length === 0) {
-            window.UIManager.showToast("✅ Todo sincronizado. No había nada pendiente.", "fa-solid fa-circle-check");
         } else {
-            const totalStuck = stuckQueue.length + deadLetter.length;
-            const summary = [...stuckQueue, ...deadLetter].reduce((acc, item) => {
-                const label = item.table || item.actionType || 'desconocido';
-                acc[label] = (acc[label] || 0) + 1;
-                return acc;
-            }, {});
-            const summaryText = Object.entries(summary).map(([k, v]) => `${v} de "${k}"`).join(', ');
-
-            const confirmMsg = `⚠️ Hay ${totalStuck} operación(es) que NO se pudieron sincronizar incluso después de reintentar ahora mismo (${summaryText}).\n\n` +
-                `Esto casi siempre es una venta o ajuste viejo que quedó atascado en ESTE dispositivo y se reintenta solo. Si ya revisaste que el sistema tiene los datos correctos, es seguro descartarlo.\n\n` +
-                `¿Descartar estas ${totalStuck} operación(es) pendientes de este dispositivo?`;
-
-            if (confirm(confirmMsg)) {
-                localStorage.removeItem(OFFLINE_QUEUE_KEY);
-                localStorage.removeItem('casa_lucenzo_offline_queue_failed');
-                logActivity("Limpieza Manual de Caché Offline", `Se descartaron ${totalStuck} operación(es) pendientes atascadas en este dispositivo (${summaryText}), confirmado a mano desde "Sincronizar y Limpiar este Dispositivo".`);
-                window.UIManager.showToast(`🧹 Se descartaron ${totalStuck} operación(es) atascadas.`, "fa-solid fa-broom");
-            } else {
-                window.UIManager.showToast("Cancelado -- no se borró nada.", "fa-solid fa-circle-info");
-                if (btn) { btn.disabled = false; btn.style.opacity = ''; }
-                return;
-            }
+            window.UIManager.showToast("✅ No había ventas en cuarentena.", "fa-solid fa-circle-check");
         }
 
         // Drop this device's cached app code so it's always running what's
@@ -239,7 +142,7 @@ async function handleCleanOfflineCache() {
         setTimeout(() => window.location.reload(), 1200);
     } catch (e) {
         console.error("Error en limpieza manual de caché offline:", e);
-        window.UIManager.showToast("❌ Error al sincronizar/limpiar. Revisá la consola.", "fa-solid fa-circle-xmark");
+        window.UIManager.showToast("❌ Error al limpiar. Revisá la consola.", "fa-solid fa-circle-xmark");
         if (btn) { btn.disabled = false; btn.style.opacity = ''; }
     }
 }
@@ -260,33 +163,9 @@ function sanitizeDataIntegrity(log) {
     });
 }
 
-function updateOfflineStatusUI() {
-    const badge = document.getElementById('header-offline-badge');
-    const countSpan = document.getElementById('header-offline-count');
-    if (!badge || !countSpan) return;
-
-    const queue = getOfflineQueue();
-    const count = queue.length;
-    const isOnline = navigator.onLine;
-
-    if (!isOnline || count > 0) {
-        badge.style.display = 'flex';
-        if (!isOnline) {
-            badge.style.background = 'rgba(239, 68, 68, 0.2)';
-            badge.style.borderColor = 'rgba(239, 68, 68, 0.5)';
-            badge.style.color = '#F87171';
-            countSpan.textContent = count > 0 ? `⚡ Sin Conexión (${count})` : '⚡ Sin Conexión';
-        } else {
-            badge.style.background = 'rgba(245, 158, 11, 0.18)';
-            badge.style.borderColor = 'rgba(245, 158, 11, 0.5)';
-            badge.style.color = '#FBBF24';
-            countSpan.textContent = `⚡ ${count} pend.`;
-        }
-    } else {
-        badge.style.display = 'none';
-    }
-}
-window.updateOfflineStatusUI = updateOfflineStatusUI;
+// #header-offline-badge (sistema/index.html) is left dormant here --
+// display:none until Task 13 gives it a new PowerSync-status-driven updater.
+// Its old driver (the offline queue's item count) no longer exists.
 
 function initSelfHealingSentinel() {
     // Intercept unhandled errors & promise rejections to prevent crashing UI
@@ -299,28 +178,6 @@ function initSelfHealingSentinel() {
         console.warn('Self-Healing Sentinel caught promise rejection:', event.reason);
         if (event && event.preventDefault) event.preventDefault();
     });
-
-    // Online/offline status listeners
-    window.addEventListener('online', () => {
-        console.log("Network online detected. Triggering Self-Healing Queue sync...");
-        updateOfflineStatusUI();
-        processOfflineQueue();
-    });
-
-    window.addEventListener('offline', () => {
-        console.log("Network offline detected.");
-        updateOfflineStatusUI();
-    });
-
-    // Periodic background check every 20 seconds
-    setInterval(() => {
-        updateOfflineStatusUI();
-        if (navigator.onLine) {
-            processOfflineQueue();
-        }
-    }, 20000);
-
-    setTimeout(updateOfflineStatusUI, 1000);
 }
 
 // Call Self-Healing Sentinel initialization immediately
@@ -781,14 +638,10 @@ async function handleCheckoutCart() {
     window.StorageManager.saveSalesLog(salesLog);
     logActivity("Registro Venta", `Venta de ${newSales.length} ítems por $${newSales.reduce((s,x)=>s+x.price, 0).toFixed(2)}. Cliente: ${clientName || 'Sin Nombre'}`);
 
-    // Sync to Supabase with Self-Healing Queue fallback
+    // insertSales writes local-first (PowerSync) when synced, Supabase-direct
+    // otherwise -- it handles its own fallback/errors internally now.
     if (window.SupabaseManager.isConfigured()) {
-        try {
-            await window.SupabaseManager.insertSales(newSales);
-        } catch (e) {
-            console.warn("Error syncing cart checkout sales to Supabase, queuing for offline auto-healing", e);
-            addToOfflineQueue('insertSales', newSales);
-        }
+        await window.SupabaseManager.insertSales(newSales);
     }
 
     currentCart = [];
@@ -1065,12 +918,7 @@ async function markTransactionAsPaid(timestamp, paymentMethod, updatedName = nul
     });
 
     if (window.SupabaseManager.isConfigured()) {
-        try {
-            await window.SupabaseManager.upsertSales(updatedSales);
-        } catch (e) {
-            console.warn("Error updating sale status to paid in Supabase, queuing for offline auto-healing", e);
-            addToOfflineQueue('upsertSales', updatedSales);
-        }
+        await window.SupabaseManager.upsertSales(updatedSales);
     }
 
     // Update local salesLog
@@ -2498,7 +2346,7 @@ async function loadAllDataFromSupabase() {
         console.log(`Auto-added ${missingDefaultProds.length} missing default products to stock.`);
         if (window.SupabaseManager.isConfigured()) {
             missingDefaultProds.forEach(p => {
-                window.SupabaseManager.updateProductStock(p.id, p.stock, p.max, p.initial_stock);
+                window.SupabaseManager.upsertProduct(p);
             });
         }
     }
@@ -2535,52 +2383,27 @@ async function loadAllDataFromSupabase() {
         // resurrect a corrected/deleted account on its own every ~45s, on
         // any device that still had the old data cached, no matter how many
         // times it got cleaned up on the server (2026-08-14, "La guaira").
-        // Only restore what this device can actually corroborate as still
-        // genuinely pending -- i.e. it's still sitting in its offline retry
-        // queue -- instead of trusting the full local mirror forever.
         //
-        // Both offline queues share one localStorage key under two different
-        // item shapes ({actionType, payload} from app.js, {table, action,
-        // data} from supabase.js), so one read covers both; the dead-letter
-        // store is separate and has to be read on its own.
-        const pendingUuids = new Set();
-        const collectUuids = (raw) => {
-            (JSON.parse(raw || '[]')).forEach(op => {
-                if (!op) return;
-                if (Array.isArray(op.payload)) op.payload.forEach(p => p && p.uuid && pendingUuids.add(p.uuid));
-                else if (op.payload && op.payload.uuid) pendingUuids.add(op.payload.uuid);
-                if (op.data && op.data.uuid) pendingUuids.add(op.data.uuid);
-            });
-        };
-        try {
-            collectUuids(localStorage.getItem(OFFLINE_QUEUE_KEY));
-            // Dead-lettered writes gave up retrying after 48h, but "gave up
-            // retrying" is not "was deleted on purpose" -- without this the
-            // sale below is treated as a server-side removal and thrown away
-            // even though it never reached the server at all.
-            collectUuids(localStorage.getItem('casa_lucenzo_offline_queue_failed'));
-        } catch (e) { /* malformed queue -- treat as no corroboration */ }
+        // Plan B, Task 12: this used to "corroborate" a gap against the old
+        // offline queue's pending UUIDs before deciding whether to
+        // auto-restore it -- that queue is gone now (insertSale/insertSales
+        // write local-first straight into PowerSync's `sales` view, so
+        // fetchSales() already includes anything this device wrote but
+        // hasn't uploaded yet; supSales and localSales should only actually
+        // diverge here in the narrow pre-first-sync window). Without a queue
+        // left to corroborate against, treat every gap the same, safe way:
+        // never silently re-insert, always quarantine for a human to review
+        // ("Limpiar Caché" surfaces it). Losing a rare, real pending sale to
+        // manual review is a far smaller failure than the old bug this
+        // guarded against.
+        salesLog = [...cleanSupSales];
 
-        const corroboratedMissing = missingLocal.filter(s => pendingUuids.has(s.uuid));
-        const uncorroboratedMissing = missingLocal.filter(s => !pendingUuids.has(s.uuid));
-
-        salesLog = [...cleanSupSales, ...corroboratedMissing];
-
-        if (corroboratedMissing.length > 0) {
-            console.log(`Restored ${corroboratedMissing.length} un-synced local sales to Supabase (corroborated by an offline retry queue).`);
-            window.SupabaseManager.insertSales(corroboratedMissing);
-        }
-        if (uncorroboratedMissing.length > 0) {
-            // Nothing explains the gap: most likely a deliberate server-side
-            // correction, but possibly a write this device lost track of.
-            // Pull it out of the active log so it stops being re-inserted on
-            // every sync, but quarantine rather than delete -- silently
-            // destroying what might be a real sale is the worse failure.
+        if (missingLocal.length > 0) {
             window.StorageManager.addQuarantinedSales(
-                uncorroboratedMissing,
-                'Faltaba en el servidor y no había ningún reintento pendiente que lo explicara'
+                missingLocal,
+                'Faltaba en el servidor tras la sincronización'
             );
-            console.warn(`${uncorroboratedMissing.length} local sale(s) missing from the server with no pending retry -- moved to quarantine, not restored.`, uncorroboratedMissing.map(s => s.uuid));
+            console.warn(`${missingLocal.length} local sale(s) missing from the server -- moved to quarantine for manual review.`, missingLocal.map(s => s.uuid));
         }
         window.StorageManager.saveSalesLog(salesLog);
     } else if (localSales.length > 0) {
@@ -4690,7 +4513,6 @@ document.addEventListener('DOMContentLoaded', () => {
         lastAutoSyncAt = now;
 
         window.UIManager.updateConnectionStatus('online');
-        window.SupabaseManager.syncOfflineQueue();
         window.SupabaseManager.subscribeToChanges(handleRealtimeDbUpdate);
         loadAllDataFromSupabase();
     };

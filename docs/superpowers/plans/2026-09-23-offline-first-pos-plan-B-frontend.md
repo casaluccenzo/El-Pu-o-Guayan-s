@@ -1272,14 +1272,115 @@ ejecutar, no asumirlo de una fecha de spec pasada).
 > de necesitar el chequeo. Retirarlos antes rompería la app en el medio del
 > refactor.
 
-- [ ] **Step 1: Confirmar que ninguna función activa todavía depende de la cola vieja**
+- [x] **Step 1: Confirmar que ninguna función activa todavía depende de la cola vieja**
 
-  Grep de `enqueueOfflineOp`/`addToOfflineQueue` — debe dar cero llamadas
-  activas (solo las definiciones, a punto de borrarse).
+  Grep real (no el inventario de arriba, que resultó desactualizado como en
+  toda task anterior) mostró algo más serio que "cola muerta": **`insertSale`/
+  `insertSales`/`upsertSales` (registrar una venta nueva) e `insertDayClose`
+  NUNCA recibieron una rama local-first en las Tasks 4-11** — a diferencia de
+  products/expenses/debts/replenishments/ingredients/stock_movements/
+  app_config/activity_logs, que sí. Seguían 100% Supabase-direct con la cola
+  vieja como único fallback offline. Retirar la cola tal cual pedía el texto
+  original de esta task habría dejado una venta hecha 100% offline sin NINGÚN
+  mecanismo de persistencia — la pérdida de datos más grave posible en un POS.
+  Mismo problema en `insertDayClose`: el cierre offline nunca movía
+  `last_close_at()` en Postgres, contradiciendo el propio comentario del
+  código en `closeDayAndResetLogs` ("esta app tiene que poder operar offline
+  un día entero", spec R1).
 
-- [ ] **Step 2: Retirar cola vieja + guards, uno por archivo**
-- [ ] **Step 3: `npm test` + smoke test manual completo (login, vender, cerrar, todo) contra dev**
-- [ ] **Step 4: Commit**
+  Encontrado ANTES de escribir código (leyendo `js/supabase.js` función por
+  función buscando `getLocalDb()`), confirmado con el usuario vía
+  `AskUserQuestion` antes de ampliar el alcance de la task. Aprobado:
+  "Migrar ventas a local-first primero (recomendado)".
+
+- [x] **Step 1b (alcance ampliado, no estaba en el plan original): migrar
+      insertSale/insertSales/upsertSales/insertDayClose a local-first**
+
+  - `js/supabase.js`: nuevo helper compartido `upsertSaleLocal(localDb, sale)`
+    — `INSERT OR REPLACE` en la tabla local `sales` de PowerSync, releyendo
+    primero `voided_at`/`void_reason`/`bcv_rate`/`cost_at_sale`/`location_id`
+    existentes (mismo motivo que `upsertProduct`: SQLite no tiene upsert
+    parcial por columna como Postgres, así que sin esto una venta editada
+    perdía su estado de anulación). `insertSale`/`insertSales`/`upsertSales`
+    lo usan cuando `getLocalDb()` no es null; si no, caen al mismo
+    Supabase-direct de siempre (sin la cola).
+  - `insertDayClose`: mismo patrón, `INSERT INTO day_closes` local cuando hay
+    `localDb`.
+  - `updateProductStock` (código pre-Task 6/9, ya no lo llamaba nadie salvo
+    el backfill de productos default faltantes) se retiró; ese único caller
+    en `loadAllDataFromSupabase` pasa a usar `upsertProduct(p)` — `.update()`
+    no crea la fila si no existe, `upsertProduct` sí.
+
+- [x] **Step 2: Retirar cola vieja + guards, uno por archivo**
+
+  `js/supabase.js`: `enqueueOfflineOp`/`syncOfflineQueue`/
+  `moveToDeadLetterQueue`/`OFFLINE_QUEUE_MAX_AGE_MS` eliminados enteros, y el
+  guard `if (!navigator.onLine) {...}` retirado de las ~19 funciones que lo
+  tenían (incluyendo las ya migradas en Tasks 5-9 — su fallback
+  Supabase-direct ahora solo loggea el error, sin re-encolar).
+
+  `js/app.js`: `OFFLINE_QUEUE_KEY`/`getOfflineQueue`/`addToOfflineQueue`/
+  `processOfflineQueue` eliminados. `handleCleanOfflineCache` adaptado (no
+  retirado): ya no sincroniza nada, pero conserva la revisión/descarte de
+  ventas en cuarentena + limpieza de caché del service worker (ambas siguen
+  siendo útiles sin relación con la cola). `updateOfflineStatusUI` eliminado
+  — `#header-offline-badge` queda con `display:none` dormido hasta que Task
+  13 le dé un driver nuevo basado en `PowerSyncManager.getSyncStatus()`.
+  `initSelfHealingSentinel` simplificado a solo los handlers genéricos de
+  error/rejection (los listeners de online/offline/interval que llamaban a
+  la cola se fueron con ella). También until ahora sin loguear: la
+  reconciliación de ventas en `loadAllDataFromSupabase` (~línea 2372) usaba
+  las UUIDs pendientes de la cola vieja para "corroborar" si una venta
+  ausente del servidor era un borrado admin o un write offline no
+  sincronizado — sin cola, se simplificó a: toda venta local ausente del
+  servidor va directo a cuarentena para revisión manual (nunca se
+  auto-restaura sin corroboración, más conservador que antes).
+
+  `sistema/index.html`: título/label del botón actualizado ("LIMPIAR CACHÉ
+  DE ESTE DISPOSITIVO", ya no dice "sincronizar").
+
+  `js/sales.js:108` (`isOffline` flag de `renderAdminDashboard`): **dejado
+  como está, a propósito** — es un flag puramente de UI (banner "Modo
+  Offline" en un dashboard), no está atado a la cola de escritura que se
+  retiró acá. Corresponde a Task 13 (indicador de sync) unificarlo, no a
+  esta task.
+
+  También se encontró y arregló un bug real que habría roto producción:
+  `autoSyncAndReconnect` (`js/app.js`, dentro del bind de listeners de
+  online/focus/visibilitychange) todavía llamaba a
+  `window.SupabaseManager.syncOfflineQueue()` — una función que este mismo
+  paso acababa de eliminar. Sin este fix, cualquier reconexión real habría
+  tirado un `TypeError` no capturado ahí mismo.
+
+- [x] **Step 3: `npm test` + smoke test manual completo (login, vender, cerrar, todo) contra dev**
+
+  `npm run lint`: 0 errores. `npm test`: 100% verde (unit + build).
+
+  Verificación real contra `casa-lucenzo-dev`, navegador real, logueado como
+  `test` (admin) — no simulado. Sin `powerSyncUrl` configurada (no
+  disponible en esta sesión), así que todo lo probado ejercitó el camino
+  Supabase-direct (rama `!getLocalDb()`), que es exactamente donde vivían
+  los guards retirados:
+  - Checkout de un carrito de 2 productos → confirmado por SQL directo que
+    ambas filas llegaron a `public.sales` (antes: dependía silenciosamente
+    de la cola vieja).
+  - "Registrar Pago" (marcar cuenta como pagada) → `upsertSales` confirmado
+    reescribiendo `name` en Postgres sin nulear otras columnas.
+  - Cierre de jornada → `insertDayClose` confirmado insertando una fila real
+    en `public.day_closes` (antes de este task, esta función nunca había
+    tenido ninguna verificación real, ni siquiera Supabase-direct).
+  - Botón "Limpiar Caché" → corrió sin errores (sin ventas en cuarentena en
+    este momento, así que solo limpió service worker + recargó).
+  - Consola sin ningún error de referencia colgante (`syncOfflineQueue is
+    not defined` y similares) durante toda la sesión de prueba.
+  - Datos de prueba y el ajuste de stock de la venta de prueba revertidos en
+    `casa-lucenzo-dev` al terminar (SQL directo). La contraseña del usuario
+    `test` se reseteó a una temporal conocida solo por mí (autorizado
+    explícitamente por el usuario en el chat) para poder loguearme — no hay
+    forma de revertirla a la original porque nunca se leyó/guardó antes de
+    pisarla; si hace falta la de antes, hay que resetearla de nuevo a mano.
+
+- [x] **Step 4: Commit**
 
 ---
 
