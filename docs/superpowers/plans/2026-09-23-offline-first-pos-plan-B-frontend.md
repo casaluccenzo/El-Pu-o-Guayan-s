@@ -441,6 +441,28 @@ ejecutar, no asumirlo de una fecha de spec pasada).
   que escribe `stock`/`initial_stock`/`max`, igual que el resto de la app
   desde Task 6. Ver commit `a13a44e`.
 
+  **Validación real de punta a punta (2026-09-27, mismo día)** — Gustavo
+  abrió el local, hizo una venta real (8 pastelitos, uno de cada sabor) y
+  cerró la jornada, todo con el código nuevo ya en producción. Verificado
+  contra Postgres en cada paso, no asumido:
+  - Cron de las 6am: `stock_movements` +8 filas (`type='load'`, uno por
+    pastelito), `products.stock` de pastelitos pasó de 0 a 120 — el
+    trigger calculó bien desde el límite sembrado.
+  - Venta: 8 `stock_movements` (`type='sale'`, `delta=-1` cada uno) +
+    8 filas en `sales`, ya marcadas como pagadas. Stock bajó de 120 a 112,
+    exacto.
+  - Cierre: primera fila real en `day_closes` (no la sembrada a mano).
+    Pastelitos → `stock=0`/`initial_stock=0`/`max=0` (reset completo,
+    correcto). Bebidas/dulces retuvieron su stock real intacto
+    (`stock=initial_stock`, sin resetear — por diseño).
+
+  Esto cubre, con datos reales, lo que la Task 17 (modo sombra) y la
+  Task 18 (tablet piloto) iban a validar de forma gradual. No hubo modo
+  sombra ni tablet piloto tal como estaba planeado, pero el primer uso
+  real del día terminó siendo una prueba de punta a punta igual de válida
+  — venta, stock y cierre, los tres puntos críticos de Plan B, confirmados
+  funcionando correctamente en producción real.
+
 - [x] **Step 4: Commit** (archivos verificados en dev + aplicados a
       producción hoy — ver el detalle de ejecución arriba)
 
