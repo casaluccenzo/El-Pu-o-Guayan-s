@@ -304,26 +304,50 @@ ejecutar, no asumirlo de una fecha de spec pasada).
   `supabase/tests/planB_assertions.sql` nuevo (mismo espíritu que
   `planA_assertions.sql`).
 
-- [ ] **Step 3: Gate — aplicar a producción — BLOQUEADO, no es solo revisar call sites**
+- [ ] **Step 3: Gate — aplicar a producción — SIGUE BLOQUEADO, releído al
+      cerrar Task 16 (2026-09-27), no dar por resuelto solo porque el
+      código de Task 9 ya existe**
 
-  Verificado contra producción real (2026-09-26): `day_closes` tiene
-  **0 filas** desde que existe la tabla (23-sep). `last_close_at()` devuelve
-  `-infinity` y nunca avanzó — Task 9 (cierre de jornada inserta en
-  `day_closes`) todavía no está hecha. El cron `api/daily-restock.js`
-  (fix de esta sesión, `3ac1f13`, ya en `main`) inserta un `stock_movements`
-  `load` de +15 cada día; sin que `last_close_at()` avance, el trigger de
-  esta Task sumaría sobre TODO el historial en vez de resetear diariamente
-  — `products.stock` real de pastelitos crecería sin techo (15, 30, 45...)
-  apenas se aplique esta migración a producción. Ya le está pasando a la
-  columna sombra `stock_computed` (invisible hoy porque nada la lee) y se
-  volvería visible/roto en cuanto se prometa a columna real.
+  Estado original (2026-09-26): verificado contra producción real —
+  `day_closes` tenía **0 filas** desde que existe la tabla (23-sep),
+  `last_close_at()` devolvía `-infinity` y nunca avanzaba, porque el
+  código de Task 9 (cierre de jornada inserta en `day_closes`) todavía no
+  existía. Aplicar la migración 033 a producción en ese estado habría
+  hecho crecer `products.stock` de pastelitos sin techo (el cron
+  `api/daily-restock.js` inserta +15/día sin que nada reste).
 
-  **No aplicar a producción hasta que exista un mecanismo real que avance
-  `last_close_at()` allá** — lo más limpio es adelantar la parte de Task 9
-  que inserta en `day_closes` (aunque sea antes que el resto de esa task),
-  o alguna mitigación equivalente. Además, sigue pendiente el chequeo
-  original de call sites de `updateProductStock` (14 en `js/app.js`) una vez
-  resuelto lo anterior.
+  **Re-chequeado ahora (2026-09-27), al cerrar Task 16, antes de dar por
+  "lista para producción" toda la rama**: Task 9 SÍ existe hoy en el
+  código de `feature/offline-first-plan-b` — pero esa rama **todavía no
+  está mergeada ni desplegada**, así que su código no corre en
+  producción todavía. Confirmado por `git log` (no por asunción): los
+  commits `eb6b244` ("Plan B Task 2 — promote shadow columns to real
+  (dev only)") y `43a74bf` ("Postgres publication + PowerSync sync
+  streams (dev)") dicen explícitamente "dev" en el propio mensaje — las
+  migraciones **033 (este promote) y 034 (la publication de PowerSync)
+  nunca se aplicaron a producción**. Intenté confirmarlo leyendo
+  directamente el estado de producción (`list_migrations` contra
+  `xttpaqokeyywjaajvjyu`) y el clasificador de modo automático lo bloqueó
+  como lectura de producción — correctamente, no lo forcé; lo que sigue
+  es inferencia de `git log`, no una lectura en vivo.
+
+  **Esto bloquea a la Task 17 (rollout en modo sombra), no solo a esta
+  Task 2**: sin la migración 034 (publication) en producción, PowerSync
+  no tiene de dónde sincronizar datos reales — el "modo sombra" de la
+  Task 17 no puede arrancar contra producción tal cual está hoy.
+
+  **No aplicar 033 a producción hasta confirmar el orden correcto con
+  Gustavo** — la secuencia más segura es: (a) aplicar 025-035 a
+  producción (probablemente junto con el merge/deploy de esta rama, ya
+  que el código de Task 9 tiene que existir en producción para que
+  `last_close_at()` avance ahí — aplicar la migración sin el código
+  desplegado reproduciría el mismo problema original), (b) recién
+  entonces arrancar la Task 17. Esto es una decisión de secuenciar
+  deploy + migraciones que le corresponde a Gustavo, no algo para
+  resolver unilateralmente acá. Sigue pendiente también el chequeo
+  original de call sites de `updateProductStock` en producción (ese
+  código ya no existe en esta rama — Task 12 lo retiró — pero
+  producción todavía corre el código viejo que sí lo llama).
 
 - [x] **Step 4: Commit** (archivos, verificados en dev — la aplicación a
       producción sigue bloqueada por el Step 3 de arriba)
@@ -363,7 +387,10 @@ ejecutar, no asumirlo de una fecha de spec pasada).
       (`getNextCrudTransaction()`, `{op, table, id, opData}`,
       `transaction.complete()`), no contra la doc generica que no la cubre.
 
-- [ ] **Step 3: Bootstrap y arranque — BLOQUEADO, decision de arquitectura pendiente**
+- [x] **Step 3: Bootstrap y arranque** — resuelto 2026-09-26 (ver hallazgo +
+      solución abajo); checkbox corregido ahora, había quedado sin tildar
+      pese a que el contenido y los Steps 4-5 (dependientes de este) ya
+      documentaban la resolución completa.
 
   Instanciar `PowerSyncDatabase` con storage OPFS (web), conectar el
   connector, llamar `connect()` en el arranque de la app (después de login).
@@ -1739,6 +1766,23 @@ ejecutar, no asumirlo de una fecha de spec pasada).
 
 ## Task 17: Rollout — modo sombra (spec §10, paso 2)
 
+> **Estado: pendiente de ejecución operacional por parte de Gustavo.**
+> Tasks 0–16 (todo el código de `feature/offline-first-plan-b`) están
+> formalmente completas, verificadas y testeadas — confirmado por Gemini.
+> Esta task ya no es código: es desplegar, esperar, y comparar datos reales
+> en producción/staging, algo que le corresponde a Gustavo, no a un agente.
+>
+> **⚠️ Bloqueador real sin resolver, encontrado al releer Task 2 antes de
+> cerrar la rama (2026-09-27), NO cubierto por Gemini ni por el trabajo de
+> código: las migraciones 033 (columnas reales) y 034 (publication de
+> PowerSync) nunca se aplicaron a producción — solo a `casa-lucenzo-dev`
+> (confirmado por `git log`, ver la nota completa en la Task 2, Step 3).
+> Sin 034 en producción, PowerSync no tiene nada de dónde sincronizar ahí:
+> el modo sombra de este Step no puede arrancar contra producción tal cual
+> está hoy. Resolver el gate de la Task 2 (y decidir el orden
+> migraciones-vs-deploy con Gustavo) es un prerequisito real de esta task,
+> no un detalle aparte.**
+
 **Files:** ninguno (operación).
 
 **Interfaces:**
@@ -1748,13 +1792,16 @@ ejecutar, no asumirlo de una fecha de spec pasada).
   producción sigue con el código de hoy sin tocar. ~1 semana, comparando que
   los datos coincidan.
 
-- [ ] **Step 1: Deploy a preview**
-- [ ] **Step 2: Comparación diaria de datos (sombra vs. real) — mismo espíritu que Plan A Task 10**
-- [ ] **Step 3: Reporte de resultado — requiere aprobación explícita del usuario para pasar a la Task 18**
+- [ ] **Step 1: Deploy a preview** — pendiente (Gustavo)
+- [ ] **Step 2: Comparación diaria de datos (sombra vs. real) — mismo espíritu que Plan A Task 10** — pendiente (Gustavo)
+- [ ] **Step 3: Reporte de resultado — requiere aprobación explícita del usuario para pasar a la Task 18** — pendiente (Gustavo)
 
 ---
 
 ## Task 18: Rollout — una tablet real (spec §10, paso 3) y luego el resto
+
+> **Estado: pendiente de ejecución operacional por parte de Gustavo**, y
+> bloqueada por la aprobación de la Task 17 (Step 3) antes de empezar.
 
 **Files:** ninguno (operación).
 
@@ -1763,9 +1810,9 @@ ejecutar, no asumirlo de una fecha de spec pasada).
   semana; si sale limpio, el resto de las tablets; recién ahí se retira el
   código viejo definitivamente.
 
-- [ ] **Step 1: Elegir la tablet piloto, con el usuario**
-- [ ] **Step 2: 1 semana de operación real, monitoreo activo**
-- [ ] **Step 3: Gate — requiere aprobación explícita del usuario antes de tocar el resto de las tablets**
+- [ ] **Step 1: Elegir la tablet piloto, con el usuario** — pendiente (Gustavo)
+- [ ] **Step 2: 1 semana de operación real, monitoreo activo** — pendiente (Gustavo)
+- [ ] **Step 3: Gate — requiere aprobación explícita del usuario antes de tocar el resto de las tablets** — pendiente (Gustavo)
 - [ ] **Step 4: Rollout al resto + merge a `main` + limpieza final del código viejo**
 
 ---
