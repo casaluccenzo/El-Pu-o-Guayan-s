@@ -393,8 +393,16 @@ function mapExpenseRow(e) {
     return { ...e, amount: toNum(e.amount), bcv_rate: toNum(e.bcv_rate) };
 }
 
-function mapDebtRow(d) {
-    return { ...d, clientName: d.client_name, amount: toNum(d.amount) };
+// Plan B, Task 8: debts.amount is the ORIGINAL debt (spec §5.3, append-only
+// abonos) -- it never gets decremented in place anymore. What the UI shows
+// and validates against is a computed balance (original - sum of
+// debt_payments), attached here as `amount` for renderDebts/settleDebtPayment
+// to keep reading unchanged; the untouched raw value survives as
+// `originalAmount` so addDebt's "add more debt for this client" flow has the
+// real base to add onto, not an already-paid-down number.
+function mapDebtRow(d, paidAmount = 0) {
+    const originalAmount = toNum(d.amount);
+    return { ...d, clientName: d.client_name, originalAmount, amount: Math.max(0, originalAmount - paidAmount) };
 }
 
 async function fetchProducts() {
@@ -505,7 +513,16 @@ async function fetchDebts() {
     if (localDb) {
         try {
             const rows = await localDb.getAll('SELECT * FROM debts ORDER BY timestamp DESC');
-            return rows.map(mapDebtRow);
+            // Local aggregate, not a server round-trip: debt_payments' local
+            // INSERT (insertDebtPayment) applies to this same SQLite view
+            // instantly, so unlike products/stock_movements (Task 6) there's
+            // no trigger-lag window where a refetch could read a stale
+            // balance -- nothing here needs a pending-write guard.
+            const paidRows = await localDb.getAll(
+                'SELECT debt_uuid, SUM(CAST(amount AS REAL)) as paid FROM debt_payments GROUP BY debt_uuid'
+            );
+            const paidByUuid = new Map(paidRows.map(p => [p.debt_uuid, p.paid]));
+            return rows.map(d => mapDebtRow(d, paidByUuid.get(d.uuid) || 0));
         } catch (e) {
             console.error("Error fetching debts from PowerSync local DB:", e);
             return null;
@@ -515,7 +532,14 @@ async function fetchDebts() {
     try {
         const { data, error } = await client.from('debts').select('*').order('timestamp', { ascending: false });
         if (error) throw error;
-        return data.map(mapDebtRow);
+        const uuids = data.map(d => d.uuid).filter(Boolean);
+        const paidByUuid = new Map();
+        if (uuids.length > 0) {
+            const { data: payments, error: payError } = await client.from('debt_payments').select('debt_uuid, amount').in('debt_uuid', uuids);
+            if (payError) throw payError;
+            (payments || []).forEach(p => paidByUuid.set(p.debt_uuid, (paidByUuid.get(p.debt_uuid) || 0) + toNum(p.amount)));
+        }
+        return data.map(d => mapDebtRow(d, paidByUuid.get(d.uuid) || 0));
     } catch (e) {
         console.error("Error fetching debts from Supabase:", e);
         return null;
@@ -1022,6 +1046,12 @@ async function deleteExpenses(uuids) {
 }
 
 async function upsertDebt(debt) {
+    // Plan B, Task 8: debts.amount is the ORIGINAL debt, never the computed
+    // balance -- always persist originalAmount (mapDebtRow's raw stored
+    // value) when the caller has it. Falls back to .amount for a brand new
+    // debt (addDebt's "new client" branch), where there are no payments yet
+    // so the two are identical anyway.
+    const amountToStore = (debt.originalAmount !== undefined && debt.originalAmount !== null) ? debt.originalAmount : debt.amount;
     const localDb = getLocalDb();
     if (localDb) {
         try {
@@ -1031,7 +1061,7 @@ async function upsertDebt(debt) {
             await localDb.execute(
                 `INSERT OR REPLACE INTO debts (id, uuid, client_name, amount, description, timestamp, location_id)
                  VALUES (?, ?, ?, ?, ?, ?, ?)`,
-                [debt.uuid, debt.uuid, debt.clientName, String(debt.amount), debt.description,
+                [debt.uuid, debt.uuid, debt.clientName, String(amountToStore), debt.description,
                  debt.timestamp, DEFAULT_LOCATION_ID]
             );
         } catch (e) {
@@ -1043,7 +1073,7 @@ async function upsertDebt(debt) {
     const payload = {
         uuid: debt.uuid,
         client_name: debt.clientName,
-        amount: debt.amount,
+        amount: amountToStore,
         description: debt.description,
         timestamp: debt.timestamp
     };
@@ -1082,6 +1112,43 @@ async function deleteDebt(uuid) {
     } catch (e) {
         console.error("Supabase deleteDebt failed. Enqueuing offline...", e);
         enqueueOfflineOp('debts', 'delete', null, 'uuid', uuid);
+    }
+}
+
+// Plan B, Task 8: abonos son append-only (spec §5.3) -- cada pago es una fila
+// nueva en debt_payments, nunca una resta persistida en debts.amount. La
+// deuda restante se deriva sumando estas filas (ver mapDebtRow/fetchDebts).
+async function insertDebtPayment(debtUuid, amount, method, deviceId) {
+    const id = crypto.randomUUID ? crypto.randomUUID() : 'dp_' + Math.random().toString(36).substring(2) + Date.now().toString(36);
+    const createdAt = new Date().toISOString();
+    const localDb = getLocalDb();
+    if (localDb) {
+        try {
+            await localDb.execute(
+                `INSERT INTO debt_payments (id, debt_uuid, amount, method, device_id, created_at, location_id)
+                 VALUES (?, ?, ?, ?, ?, ?, ?)`,
+                [id, debtUuid, String(amount), method || null, deviceId || null, createdAt, DEFAULT_LOCATION_ID]
+            );
+        } catch (e) {
+            console.error("PowerSync local insertDebtPayment failed:", e);
+        }
+        return;
+    }
+    if (!client) return;
+    const payload = {
+        id, debt_uuid: debtUuid, amount, method: method || null,
+        device_id: deviceId || null, created_at: createdAt
+    };
+    try {
+        if (!navigator.onLine) {
+            enqueueOfflineOp('debt_payments', 'insert', payload);
+            return;
+        }
+        const { error } = await client.from('debt_payments').insert(payload);
+        if (error) throw error;
+    } catch (e) {
+        console.error("Supabase insertDebtPayment failed. Enqueuing offline...", e);
+        enqueueOfflineOp('debt_payments', 'insert', payload);
     }
 }
 
@@ -2097,6 +2164,7 @@ window.SupabaseManager = {
     deleteExpenses,
     upsertDebt,
     deleteDebt,
+    insertDebtPayment,
     upsertReplenishment,
     deleteReplenishment,
     upsertIngredient,

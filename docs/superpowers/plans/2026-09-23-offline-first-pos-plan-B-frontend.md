@@ -853,16 +853,19 @@ ejecutar, no asumirlo de una fecha de spec pasada).
 ## Task 8: Abonos a deudas — `debt_payments` en vez de mutar `debts.amount`
 
 **Files:**
-- Modify: `js/app.js` — `settleDebtPayment` (1657-~1705)
-- Modify: `js/supabase.js` — `upsertDebt` queda solo para crear/editar la
-  deuda original (`addDebt`, 1602-1651, sin tocar); nueva función
-  `insertDebtPayment(debtUuid, amount, method)`
+- Modify: `js/app.js` — `settleDebtPayment` (1652-~1705); también `addDebt`
+  (1597, la rama "cliente ya existe" -- no estaba en la lista original pero
+  necesitaba el mismo ajuste, ver Step 1).
+- Modify: `js/supabase.js` — `mapDebtRow`/`fetchDebts` calculan el saldo;
+  `upsertDebt` sigue siendo la única vía para crear/editar la deuda
+  original; nueva función `insertDebtPayment(debtUuid, amount, method,
+  deviceId)`.
 
 **Interfaces:**
 - Produces: cada abono es un `INSERT` en `debt_payments` local (append-only,
   spec §5.3). El saldo mostrado en la UI pasa a calcularse como
   `debts.amount - SUM(debt_payments.amount WHERE debt_uuid = ?)` (query
-  local o vista PowerSync), no una resta que se persiste.
+  local, ver Step 1), no una resta que se persiste.
 
 > **Ojo con el flujo actual:** `settleDebtPayment` hoy hace tres cosas en
 > una (app.js:1657-1705) — resta `debts.amount`, crea una venta sintética
@@ -872,16 +875,58 @@ ejecutar, no asumirlo de una fecha de spec pasada).
 > parte del modelo de deudas. Solo la resta directa de `debts.amount` se
 > reemplaza por el insert en `debt_payments`.
 
-- [ ] **Step 1: `insertDebtPayment`**
-- [ ] **Step 2: Reescribir `settleDebtPayment`** — insertar el pago, dejar
-      la venta sintética de "abono" como está, dejar de mutar `debts.amount`
-      directo.
-- [ ] **Step 3: Dos dispositivos cobrando el mismo cliente offline (spec §9 manual)**
+- [x] **Step 1: `insertDebtPayment` + saldo calculado**
 
-  El caso que el spec pone como ejemplo explícito de por qué este modelo
-  hace falta — confirmar que los dos abonos entran y el saldo baja bien.
+  `debts.amount` pasa a significar SOLO la deuda original (lo que `addDebt`
+  crea/edita) -- nunca más se decrementa. `mapDebtRow(d, paidAmount)` ahora
+  devuelve dos campos: `originalAmount` (el valor crudo, tal cual está en la
+  columna) y `amount` (el saldo calculado, `originalAmount - paidAmount`) --
+  este último mantiene el mismo nombre que ya usaban `renderDebts` (ui.js) y
+  `settleDebtPayment`, así que ninguno de los dos necesitó tocarse para
+  seguir mostrando/validando el saldo correcto. `fetchDebts()` sale este
+  cálculo con un segundo query local (`SELECT debt_uuid, SUM(amount) ...
+  GROUP BY debt_uuid` sobre `debt_payments`) -- es un agregado puramente
+  local, no algo que dependa de un trigger de Postgres, así que a
+  diferencia de `stock_movements` (Task 6) no hace falta ningún guard tipo
+  `getPendingStockMovementProductIds`: un `insertDebtPayment` local se
+  refleja al instante en cualquier `fetchDebts()` posterior, sin ventana de
+  desincronización.
 
-- [ ] **Step 4: Commit**
+  Encontrado al implementar (no estaba en el plan original): `upsertDebt`
+  ahora tiene que persistir `originalAmount`, no el `amount` (calculado) que
+  trae el objeto en memoria -- si no, `addDebt`'s rama "el cliente ya tenía
+  deuda" (que hace `existingClient.amount += nuevoMonto`) habría escrito el
+  saldo YA DESCONTADO más el nuevo monto como si fuera la deuda original
+  completa, borrando silenciosamente el historial de abonos ya hechos. Se
+  ajustó esa rama de `addDebt` para incrementar `originalAmount` (no
+  `amount`) y `upsertDebt` para preferir `originalAmount` cuando está
+  presente (con fallback a `amount` para una deuda nueva, donde ambos son
+  iguales por no haber abonos todavía). Verificado en el navegador real:
+  deuda de $100 → dos abonos de $30 (simulando 2 dispositivos) → saldo
+  calculado $40, `debts.amount` en Postgres sigue en 100 → deuda nueva de
+  +$20 para el mismo cliente → `originalAmount` sube a 120, saldo pasa a
+  60 -- todo confirmado con lecturas directas a Postgres.
+
+- [x] **Step 2: Reescribir `settleDebtPayment`**
+
+  Se dejó de mutar `client.timestamp`/`client.description` además de
+  `client.amount` -- ya no hay ningún `upsertDebt` en esta función que los
+  suba a Postgres, así que mutarlos solo local habría dejado esta pestaña
+  mostrando algo distinto a cualquier otro dispositivo (o a sí misma tras
+  un refetch). `client.amount` sí se sigue mutando en memoria para
+  feedback optimista instantáneo -- `fetchDebts()` recalcula el mismo
+  valor en cuanto `insertDebtPayment` sube. La venta sintética "Abono: X"
+  sigue igual, sin tocar.
+
+- [x] **Step 3: Verificación real — dos dispositivos cobrando offline (spec §9)**
+
+  Simulado en `casa-lucenzo-dev` con `insertDebtPayment` desde dos
+  `deviceId` distintos sobre la misma deuda: ambos abonos entraron como
+  filas separadas en `debt_payments`, y el saldo calculado bajó
+  correctamente reflejando la suma de los dos ($100 → $40). Confirmado
+  contra Postgres real, no solo local.
+
+- [x] **Step 4: Commit**
 
 ---
 

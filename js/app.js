@@ -1613,6 +1613,13 @@ function addDebt(e) {
     let targetDebtObj;
 
     if (existingClient) {
+        // Plan B, Task 8: existingClient.amount is now a COMPUTED balance
+        // (original - abonos, see mapDebtRow), not the stored value -- must
+        // add the new debt onto originalAmount, or upsertDebt would persist
+        // an already-paid-down number as if it were the fresh original.
+        const currentOriginal = (existingClient.originalAmount !== undefined && existingClient.originalAmount !== null)
+            ? existingClient.originalAmount : existingClient.amount;
+        existingClient.originalAmount = currentOriginal + amount;
         existingClient.amount += amount;
         existingClient.timestamp = new Date().toISOString();
         if (description) {
@@ -1666,9 +1673,15 @@ function settleDebtPayment(uuid) {
 
     triggerHaptic(15);
 
+    // Plan B, Task 8: abonos son append-only (spec §5.3) -- ya no se persiste
+    // una resta de debts.amount (ver insertDebtPayment más abajo), así que
+    // dejar de mutar client.timestamp/description también: nada los sube a
+    // Postgres desde acá, y mutarlos solo local crearía una vista distinta a
+    // la de cualquier otro dispositivo (o esta misma pestaña tras un
+    // refetch). El monto sí se mantiene optimista en memoria para feedback
+    // instantáneo -- fetchDebts vuelve a calcular el mismo valor apenas
+    // insertDebtPayment sube.
     client.amount = Math.max(0, client.amount - paymentAmount);
-    client.timestamp = new Date().toISOString();
-    client.description = `Abono de $${paymentAmount.toFixed(2)}`;
 
     const saleItem = {
         uuid: crypto.randomUUID ? crypto.randomUUID() : Math.random().toString(36).substring(2) + Date.now().toString(36),
@@ -1685,7 +1698,7 @@ function settleDebtPayment(uuid) {
     logActivity("Abono de Deuda", `Cliente ${client.clientName} abonó $${paymentAmount.toFixed(2)}. Restante: $${client.amount.toFixed(2)}`);
 
     if (window.SupabaseManager.isConfigured()) {
-        window.SupabaseManager.upsertDebt(client);
+        window.SupabaseManager.insertDebtPayment(client.uuid, paymentAmount, null, myDeviceId);
         window.SupabaseManager.insertSale(saleItem);
     }
 
