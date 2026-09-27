@@ -72,7 +72,23 @@ function init() {
         try {
             client = window.supabase.createClient(url, key);
             console.log("Supabase Client initialized successfully.");
-            
+
+            // Plan B, Task 11 (spec §6, "Bordes"): record proof of real
+            // connectivity for the 30-day offline limit (AuthManager.
+            // isOfflineLimitExceeded, js/auth.js). SIGNED_IN/TOKEN_REFRESHED
+            // only fire after a genuine round-trip to Supabase Auth --
+            // confirmed reading GoTrueClient's own source, not assumed.
+            // INITIAL_SESSION is deliberately excluded: per its own
+            // documented behavior it just reflects whatever was already in
+            // storage, which a fully offline load can still produce, and
+            // treating it as "online" would silently keep resetting this
+            // clock forever on a device that never actually reconnects.
+            client.auth.onAuthStateChange((event) => {
+                if (event === 'SIGNED_IN' || event === 'TOKEN_REFRESHED') {
+                    window.StorageManager.saveLastAuthOnlineAt(new Date().toISOString());
+                }
+            });
+
             // Trigger offline queue synchronization on startup and when coming online
             window.addEventListener('online', syncOfflineQueue);
             syncOfflineQueue();

@@ -3525,6 +3525,14 @@ async function handleQuickPINInput(pin) {
         return false;
     }
 
+    // Plan B, Task 11 (spec §6, "Bordes"): quick-PIN reactivation is refused
+    // past 30 days without proven connectivity -- full password login is
+    // the required recovery path, and it inherently needs a connection.
+    if (window.AuthManager && window.AuthManager.isOfflineLimitExceeded(window.StorageManager.loadLastAuthOnlineAt())) {
+        if (window.UIManager) window.UIManager.showToast("🔒 Este dispositivo lleva más de 30 días sin conectarse. Iniciá sesión con tu contraseña para continuar.", "fa-solid fa-lock");
+        return false;
+    }
+
     const lockout = window.StorageManager.loadPinLockoutState(activeUser.id);
     const now = Date.now();
     if (lockout.lockedUntil && now < lockout.lockedUntil) {

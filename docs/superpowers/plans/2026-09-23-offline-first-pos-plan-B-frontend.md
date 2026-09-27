@@ -1171,7 +1171,11 @@ ejecutar, no asumirlo de una fecha de spec pasada).
 ## Task 11: Alta de dispositivo + límite de 30 días offline
 
 **Files:**
-- Modify: `js/auth.js`, `js/app.js` (`handleUserLogin`, 3353-3415)
+- Modify: `js/supabase.js` — `init()`, hook a `client.auth.onAuthStateChange`
+- Modify: `js/auth.js` — nueva `isOfflineLimitExceeded` en `AuthManager`
+- Modify: `js/storage.js` — nuevas `loadLastAuthOnlineAt`/`saveLastAuthOnlineAt`
+- Modify: `js/app.js` — `handleQuickPINInput` (chequeo agregado; `handleUserLogin`
+  no necesitó tocarse, ver Step 1-2)
 
 **Interfaces:**
 - Produces: guardado seguro del refresh token de Supabase en el
@@ -1180,11 +1184,64 @@ ejecutar, no asumirlo de una fecha de spec pasada).
   automática de sesión al reconectar, y bloqueo forzado si pasaron > 30 días
   offline (spec §6, "Bordes").
 
-- [ ] **Step 1: Confirmar dónde vive hoy el refresh token en la sesión web de Supabase**
-- [ ] **Step 2: Lógica de renovación automática al reconectar**
-- [ ] **Step 3: Contador de días offline + bloqueo a los 30**
-- [ ] **Step 4: Test manual — simular > 30 días (mockear la fecha) y confirmar que pide login completo**
-- [ ] **Step 5: Commit**
+- [x] **Step 1: Confirmar dónde vive hoy el refresh token en la sesión web de Supabase**
+
+  `createClient(url, key)` no pasa opciones de `auth` -- hereda los
+  defaults de `@supabase/supabase-js` (confirmado leyendo el código fuente
+  real de `GoTrueClient`, no supuesto): `persistSession: true` (guarda en
+  `window.localStorage` por default) y `autoRefreshToken: true`. El refresh
+  token ya vive ahí desde que existe el login con Supabase Auth -- nada que
+  cambiar acá, spec §6 punto 1 ya estaba resuelto de fábrica.
+
+- [x] **Step 2: N/A -- ya resuelto por los defaults de supabase-js**
+
+  Leyendo el código fuente: el auto-refresh corre con un ticker cada 30s
+  (`AUTO_REFRESH_TICK_DURATION_MS`) y refresca cuando faltan ≤3 ticks para
+  que expire el JWT (`AUTO_REFRESH_TICK_THRESHOLD`) -- o sea, como máximo
+  30s de latencia para notar que el token venció y renovarlo, sin importar
+  cuánto tiempo estuvo offline. Verificado real: forzar
+  `client.auth.refreshSession()` en el navegador contra `casa-lucenzo-dev`
+  disparó `TOKEN_REFRESHED` y devolvió una sesión nueva sin error. No hizo
+  falta escribir lógica de reconexión -- ya viene andando.
+
+- [x] **Step 3: Contador de días offline + bloqueo a los 30**
+
+  `loadLastAuthOnlineAt`/`saveLastAuthOnlineAt` (`js/storage.js`,
+  localStorage) guardan el último momento en que este dispositivo probó
+  conectividad real. Se actualiza SOLO en `SIGNED_IN`/`TOKEN_REFRESHED`
+  (`client.auth.onAuthStateChange`, enganchado en `init()`) --
+  deliberadamente NO en `INITIAL_SESSION`: por su propia documentación esa
+  se dispara "right after the client is constructed and the initial
+  session from storage is loaded", sin garantía de red -- tratarla como
+  "online" habría reseteado el contador solo con abrir la app offline,
+  vaciando de sentido la regla entera. `AuthManager.isOfflineLimitExceeded`
+  (`js/auth.js`) compara contra 30 días. El chequeo se agregó en
+  `handleQuickPINInput` (app.js): si se excedió, se rechaza el PIN sin
+  intentar verificarlo y se pide iniciar sesión con contraseña -- ese
+  camino siempre necesita conexión, así que duplica como recuperación.
+  `handleUserLogin` no necesitó ningún cambio (un login nuevo siempre
+  requiere red, así que la regla de "30 días offline" nunca podría
+  bloquearlo de todas formas).
+
+  De paso, investigado y confirmado que NO hacía falta tocar: la
+  desactivación de un usuario (`profiles.active = false`) ya se aplica
+  sola en cuanto el dispositivo toca internet -- `get_user_role()` y
+  `get_user_location()` (RLS, migraciones 001/016b) filtran
+  `WHERE active = true` en cada llamada, así que un usuario desactivado
+  pierde acceso a nivel de base de datos automáticamente, sin necesitar
+  ninguna lógica de cliente nueva.
+
+- [x] **Step 4: Verificación real — 30 días excedidos bloquea, reciente no**
+
+  Contra `casa-lucenzo-dev`: `SIGNED_IN` real (login) guardó el timestamp;
+  `refreshSession()` real disparó `TOKEN_REFRESHED` y lo actualizó de
+  nuevo. Con el timestamp mockeado a 31 días atrás,
+  `isOfflineLimitExceeded` dio `true` y `handlePINInput('1234')` (PIN
+  correcto) fue rechazado sin comparar. Con 29 días, dio `false`. Al
+  restaurar un timestamp fresco, el mismo PIN correcto volvió a funcionar
+  normalmente.
+
+- [x] **Step 5: Commit**
 
 ---
 

@@ -262,6 +262,28 @@ function savePinLockoutState(userId, state) {
     }
 }
 
+// ================= AUTH FRESHNESS (Plan B, Task 11) =================
+//
+// Last time this device proved it was actually online AND authenticated --
+// updated only on SIGNED_IN/TOKEN_REFRESHED (js/supabase.js init()), never
+// on INITIAL_SESSION (that one just reflects whatever's cached in storage,
+// which could be read fully offline and would silently reset this clock).
+// AuthManager.isOfflineLimitExceeded (js/auth.js) reads this to enforce the
+// 30-day rule (spec §6, "Bordes").
+const LAST_AUTH_ONLINE_KEY = 'casa_lucenzo_last_auth_online_at';
+
+function loadLastAuthOnlineAt() {
+    return localStorage.getItem(LAST_AUTH_ONLINE_KEY) || null;
+}
+
+function saveLastAuthOnlineAt(isoString) {
+    try {
+        localStorage.setItem(LAST_AUTH_ONLINE_KEY, isoString);
+    } catch (e) {
+        console.error("Failed to save last auth online timestamp", e);
+    }
+}
+
 const BCV_PREFS_KEY = 'casa_lucenzo_bcv_prefs';
 
 function loadBcvPreferences() {
@@ -509,6 +531,8 @@ window.StorageManager = {
     savePreferences,
     loadPinLockoutState,
     savePinLockoutState,
+    loadLastAuthOnlineAt,
+    saveLastAuthOnlineAt,
     loadBcvPreferences,
     saveBcvPreferences,
     loadBcvLastFetch,
