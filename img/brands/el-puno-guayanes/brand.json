@@ -1,5 +1,9 @@
 {
   "displayName": "El Puño Guayanés",
   "shortName": "El Puño Guayanés",
-  "description": "Sistema de gestión de inventario, caja y reposición en tiempo real para El Puño Guayanés."
+  "description": "Sistema de gestión de inventario, caja y reposición en tiempo real para El Puño Guayanés.",
+  "desktop": {
+    "appId": "com.elpunoguayanes.pos",
+    "publishRepo": "El-Pu-o-Guayan-s"
+  }
 }
