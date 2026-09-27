@@ -429,8 +429,16 @@ async function fetchSales() {
     const localDb = getLocalDb();
     if (localDb) {
         try {
+            // Plan B, Task 7: a voided sale (spec §5.2) must disappear from
+            // the register/reports exactly like a deleted one used to --
+            // loadAllDataFromSupabase() already treats anything absent from
+            // this result as removed locally (see the comment below), so
+            // filtering it out here is enough for the normal full-refetch
+            // path. The Realtime echo path is separate (see
+            // handleRealtimeDbUpdate in app.js), since that one patches
+            // salesLog in place instead of refetching.
             const rows = await localDb.getAll(
-                'SELECT * FROM sales WHERE timestamp >= ? ORDER BY timestamp ASC, uuid ASC',
+                'SELECT * FROM sales WHERE timestamp >= ? AND voided_at IS NULL ORDER BY timestamp ASC, uuid ASC',
                 [currentSalesExpensesFilterTime()]
             );
             return rows.map(mapSaleRow);
@@ -452,6 +460,7 @@ async function fetchSales() {
         // absent from this result as removed server-side.
         const rows = await fetchAllPages(offset => client.from('sales').select('*')
             .gte('timestamp', filterTime)
+            .is('voided_at', null)
             .order('timestamp', { ascending: true })
             .order('uuid', { ascending: true })
             .range(offset, offset + POSTGREST_PAGE_SIZE - 1));
@@ -813,70 +822,111 @@ async function insertSales(sales) {
 }
 
 
-async function deleteSale(uuid) {
-    if (!client) return;
-    try {
-        if (!navigator.onLine) {
-            enqueueOfflineOp('sales', 'delete', null, 'uuid', uuid);
-            return;
+// Plan B, Task 7: sales are never DELETEd once synced (spec §5.2, hard
+// rule) -- voidSale/voidSalesByTimestamp replace deleteSale/deleteSales/
+// deleteSalesByTimestamp. A void is just a normal column UPDATE, so unlike
+// the stock-movement writes (Task 5/6) it needs no INSERT OR REPLACE
+// workaround for the "cannot UPSERT a view" limit -- plain UPDATE already
+// works against PowerSync's local views.
+async function voidSale(uuid, reason) {
+    const nowIso = new Date().toISOString();
+    const localDb = getLocalDb();
+    if (localDb) {
+        try {
+            await localDb.execute(
+                'UPDATE sales SET voided_at = ?, void_reason = ? WHERE id = ?',
+                [nowIso, reason || null, uuid]
+            );
+        } catch (e) {
+            console.error("PowerSync local voidSale failed:", e);
         }
-        const { error } = await client.from('sales').delete().eq('uuid', uuid);
-        if (error) throw error;
-    } catch (e) {
-        console.error("Supabase deleteSale failed. Enqueuing offline...", e);
-        enqueueOfflineOp('sales', 'delete', null, 'uuid', uuid);
+        return;
     }
-}
-
-async function deleteSales(uuids) {
     if (!client) return;
-    if (!Array.isArray(uuids) || uuids.length === 0) return;
     try {
         if (!navigator.onLine) {
-            uuids.forEach(uuid => enqueueOfflineOp('sales', 'delete', null, 'uuid', uuid));
+            // Reuses the 'upsert' queue path (a partial payload only patches
+            // the columns given, same as every other upsert in this file) --
+            // a bespoke 'void' action type would fall through
+            // syncOfflineQueue's unrecognized-action branch and never
+            // actually apply, just sit in the queue until it dead-letters.
+            enqueueOfflineOp('sales', 'upsert', { uuid, voided_at: nowIso, void_reason: reason || null });
             return;
         }
-        const { error } = await client.from('sales').delete().in('uuid', uuids);
+        const { error } = await client.from('sales').update({ voided_at: nowIso, void_reason: reason || null }).eq('uuid', uuid);
         if (error) throw error;
     } catch (e) {
-        console.error("Supabase deleteSales batch failed. Enqueuing offline...", e);
-        uuids.forEach(uuid => enqueueOfflineOp('sales', 'delete', null, 'uuid', uuid));
+        console.error("Supabase voidSale failed. Enqueuing offline...", e);
+        enqueueOfflineOp('sales', 'upsert', { uuid, voided_at: nowIso, void_reason: reason || null });
     }
 }
 
 /**
- * Deletes every sales row for a given account (grouped by timestamp, the
- * same identity key used everywhere else -- Cuentas Activas, Historial,
- * handleEditSale) right before that account is replaced with a corrected
- * set. Deletes by timestamp instead of a caller-supplied uuid list so a
- * stale/incomplete list (the account changed since it was last loaded
- * locally) can never leave old rows behind under the new set.
+ * Voids every not-yet-voided sales row for a given account (grouped by
+ * timestamp, the same identity key used everywhere else -- Cuentas Activas,
+ * Historial, handleEditSale) right before that account is replaced with a
+ * corrected set. Matches by timestamp instead of a caller-supplied uuid list
+ * so a stale/incomplete list (the account changed since it was last loaded
+ * locally) can never leave old rows unvoided under the new set.
  *
- * Deliberately does NOT enqueue for later offline retry like deleteSales
- * does: a queued "delete everything under this timestamp" would still match
- * -- and silently wipe out -- the correct replacement rows once they're
- * inserted under that same timestamp. Returns false so the caller can abort
- * the edit outright and have the cashier retry once back online, instead of
- * risking either a duplicate (delete never lands) or a future data loss
- * (delete lands later, after the timestamp has valid new rows again).
+ * The Supabase-direct fallback deliberately does NOT enqueue for later
+ * offline retry, same reasoning deleteSalesByTimestamp used to have: a
+ * queued "void everything under this timestamp" retried later would still
+ * match -- and incorrectly void -- the corrected replacement rows once
+ * they're inserted under that same timestamp (edits reuse the account's
+ * original timestamp as its identity). Returns false so the caller can
+ * abort the edit outright and have the cashier retry once back online. The
+ * local-first (PowerSync) path below doesn't have this race: CRUD tracking
+ * captures the specific rows affected at write time, not a timestamp
+ * re-matched against Postgres later, so it's safe to run unconditionally.
  * @param {string} timestamp Account identity (ISO timestamp all its sale rows share)
- * @returns {Promise<boolean>} true only if the delete is confirmed to have run now
+ * @param {string} [reason] Reason recorded on every voided row
+ * @returns {Promise<boolean>} true only if at least one row was voided just now
  */
-async function deleteSalesByTimestamp(timestamp) {
-    if (!client) return false;
+async function voidSalesByTimestamp(timestamp, reason) {
     if (!timestamp) return false;
+    const nowIso = new Date().toISOString();
+    const localDb = getLocalDb();
+    if (localDb) {
+        try {
+            // julianday(...) instead of a raw string match: a sale's timestamp
+            // is inserted locally as JS's toISOString() ("...462Z"), but once
+            // it round-trips through Postgres and syncs back down, the same
+            // instant reads back as Postgres' own timestamptz format
+            // ("...462+00:00") -- a different string for the same moment.
+            // sessionStorage can hold whichever format was current when the
+            // edit started, so a raw `timestamp = ?` silently matched zero
+            // rows the moment a background resync landed mid-edit (confirmed
+            // in a real browser: both formats parse to the identical
+            // julianday value, a plain string compare does not see them as
+            // equal).
+            const result = await localDb.execute(
+                'UPDATE sales SET voided_at = ?, void_reason = ? WHERE julianday(timestamp) = julianday(?) AND voided_at IS NULL RETURNING id',
+                [nowIso, reason || null, timestamp]
+            );
+            return !!(result.rows && result.rows.length > 0);
+        } catch (e) {
+            console.error("PowerSync local voidSalesByTimestamp failed:", e);
+            return false;
+        }
+    }
+    if (!client) return false;
     if (!navigator.onLine) return false;
     try {
-        // .select() forces Postgres to hand back the rows it actually removed.
-        // Without it, an RLS policy that silently filters the DELETE out
+        // .select() forces Postgres to hand back the rows it actually voided.
+        // Without it, an RLS policy that silently filters the UPDATE out
         // (wrong role, expired session) still comes back as { error: null } --
-        // a "success" that deleted zero rows is exactly how the original bug
-        // happened, so it must count as a failure here too, not a pass-through.
-        const { data, error } = await client.from('sales').delete().eq('timestamp', timestamp).select('uuid');
+        // a "success" that voided zero rows is exactly how the original
+        // delete-based bug happened, so it must count as a failure here too.
+        const { data, error } = await client.from('sales')
+            .update({ voided_at: nowIso, void_reason: reason || null })
+            .eq('timestamp', timestamp)
+            .is('voided_at', null)
+            .select('uuid');
         if (error) throw error;
         return Array.isArray(data) && data.length > 0;
     } catch (e) {
-        console.error("Supabase deleteSalesByTimestamp failed:", e);
+        console.error("Supabase voidSalesByTimestamp failed:", e);
         return false;
     }
 }
@@ -1594,6 +1644,7 @@ async function fetchStatsData() {
         const [sales, expenses] = await Promise.all([
             fetchAllPages(offset => client.from('sales').select('*')
                 .gte('timestamp', sevenDaysAgo.toISOString())
+                .is('voided_at', null)
                 .order('timestamp', { ascending: true })
                 .range(offset, offset + POSTGREST_PAGE_SIZE - 1)),
             fetchAllPages(offset => client.from('expenses').select('*')
@@ -1634,6 +1685,7 @@ async function fetchPnlData(startISO, endISO) {
             fetchAllPages(offset => client.from('sales').select('*')
                 .gte('timestamp', startISO)
                 .lt('timestamp', endISO)
+                .is('voided_at', null)
                 .order('timestamp', { ascending: true })
                 .order('uuid', { ascending: true })
                 .range(offset, offset + POSTGREST_PAGE_SIZE - 1)),
@@ -1662,6 +1714,7 @@ async function fetchDayReport(dateStr) {
             client.from('sales').select('*')
                 .gte('timestamp', dayStart.toISOString())
                 .lte('timestamp', dayEnd.toISOString())
+                .is('voided_at', null)
                 .order('timestamp', { ascending: true }),
             client.from('expenses').select('*')
                 .gte('timestamp', dayStart.toISOString())
@@ -1732,6 +1785,7 @@ async function fetchReportDays(days = 30) {
         const data = await fetchAllPages(offset => client.from('sales')
             .select('timestamp')
             .gte('timestamp', startDate.toISOString())
+            .is('voided_at', null)
             .order('timestamp', { ascending: false })
             .order('uuid', { ascending: true })
             .range(offset, offset + POSTGREST_PAGE_SIZE - 1));
@@ -1775,6 +1829,7 @@ async function fetchSalesHistory(days) {
         const rows = await fetchAllPages(offset => {
             let query = client.from('sales')
                 .select('product_id, name, price, timestamp')
+                .is('voided_at', null)
                 .order('timestamp', { ascending: true })
                 .range(offset, offset + POSTGREST_PAGE_SIZE - 1);
             if (startIso) query = query.gte('timestamp', startIso);
@@ -2035,9 +2090,8 @@ window.SupabaseManager = {
     insertSale,
     insertSales,
     upsertSales,
-    deleteSale,
-    deleteSales,
-    deleteSalesByTimestamp,
+    voidSale,
+    voidSalesByTimestamp,
     insertExpense,
     deleteExpense,
     deleteExpenses,

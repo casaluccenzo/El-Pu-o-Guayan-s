@@ -117,8 +117,6 @@ async function processOfflineQueue() {
         try {
             if (item.actionType === 'insertSales' || item.actionType === 'upsertSales') {
                 await window.SupabaseManager.upsertSales(item.payload);
-            } else if (item.actionType === 'deleteSales') {
-                await window.SupabaseManager.deleteSales(item.payload);
             } else if (item.actionType === 'updateStock') {
                 await window.SupabaseManager.updateProductStock(item.payload.id, item.payload.stock);
             } else {
@@ -681,8 +679,8 @@ async function handleClearCart() {
         const editingTimestampForClear = sessionStorage.getItem('casa_lucenzo_editing_timestamp');
         if (editingSalesStr && editingTimestampForClear) {
             if (window.SupabaseManager.isConfigured()) {
-                const deleted = await window.SupabaseManager.deleteSalesByTimestamp(editingTimestampForClear);
-                if (!deleted) {
+                const voided = await window.SupabaseManager.voidSalesByTimestamp(editingTimestampForClear, "Cuenta vaciada durante edición");
+                if (!voided) {
                     window.UIManager.showToast("⚠️ No se pudo confirmar el vaciado por falta de conexión. La cuenta podría reaparecer -- revisala en Cuentas Activas.", "fa-solid fa-triangle-exclamation");
                 }
             }
@@ -740,16 +738,16 @@ async function handleCheckoutCart() {
     const timestamp = editingTimestamp || new Date().toISOString();
 
     if (editingSalesStr && editingTimestamp) {
-        // Delete by timestamp (the account's real identity key), not by a
+        // Void by timestamp (the account's real identity key), not by a
         // uuid list captured back when "Modificar" was pressed -- that list
         // can go stale, which used to leave the old rows behind forever
         // while the corrected set was inserted right on top of them,
-        // silently doubling that account's sales. If the delete can't be
+        // silently doubling that account's sales. If the void can't be
         // confirmed right now, stop here instead of inserting a replacement
-        // on top of rows that might still be there.
+        // on top of rows that might still be active.
         if (window.SupabaseManager.isConfigured()) {
-            const deleted = await window.SupabaseManager.deleteSalesByTimestamp(editingTimestamp);
-            if (!deleted) {
+            const voided = await window.SupabaseManager.voidSalesByTimestamp(editingTimestamp, "Corrección de cuenta");
+            if (!voided) {
                 window.UIManager.showToast("⚠️ No se pudo confirmar la corrección por falta de conexión. Probá de nuevo en unos segundos -- no se guardó nada todavía.", "fa-solid fa-triangle-exclamation");
                 return;
             }
@@ -832,24 +830,26 @@ function handleUndoSale(timestamp) {
     triggerHaptic(15);
 
     if (confirm(`¿Estás seguro de deshacer esta cuenta completa y devolver los productos al stock?`)) {
-        // Immediately record deleted UUIDs locally so sync never resurrects them
-        const uuidsToDelete = matchingSales.map(s => s.uuid).filter(Boolean);
-        if (uuidsToDelete.length > 0) {
-            window.StorageManager.addDeletedSalesUuids(uuidsToDelete);
+        // Immediately record voided UUIDs locally so a stale Supabase-direct
+        // refetch (pre-first-sync only -- PowerSync's own local view updates
+        // instantly) can't resurrect them into salesLog before the void
+        // upload lands.
+        const uuidsToVoid = matchingSales.map(s => s.uuid).filter(Boolean);
+        if (uuidsToVoid.length > 0) {
+            window.StorageManager.addDeletedSalesUuids(uuidsToVoid);
         }
 
         matchingSales.forEach(sale => {
             const product = products.find(p => p.id === sale.productId);
             if (product) {
+                const beforeUndo = product.stock;
                 product.stock = product.stock >= product.max ? product.stock + 1 : Math.min(product.max, product.stock + 1);
-                if (window.SupabaseManager.isConfigured()) {
-                    window.SupabaseManager.updateProductStock(product.id, product.stock);
-                }
+                recordStockMovement(product, product.stock - beforeUndo, 'sale_return', sale.uuid);
             }
         });
 
-        if (window.SupabaseManager.isConfigured() && uuidsToDelete.length > 0) {
-            window.SupabaseManager.deleteSales(uuidsToDelete);
+        if (window.SupabaseManager.isConfigured() && uuidsToVoid.length > 0) {
+            uuidsToVoid.forEach(uuid => window.SupabaseManager.voidSale(uuid, "Cuenta deshecha por el usuario"));
         }
 
         // Filter out these sales from memory
@@ -1097,9 +1097,10 @@ async function markTransactionAsPaid(timestamp, paymentMethod, updatedName = nul
 function clearAllSales() {
     triggerHaptic(20);
     if (confirm("¿Estás seguro de que quieres borrar el historial de ventas y reiniciar la caja a $0.00?")) {
-        // Sync deletes to Supabase
+        // Void instead of delete (spec §5.2) -- doesn't touch product stock,
+        // same as the delete this replaces never did either.
         if (window.SupabaseManager.isConfigured()) {
-            salesLog.forEach(s => window.SupabaseManager.deleteSale(s.uuid));
+            salesLog.forEach(s => window.SupabaseManager.voidSale(s.uuid, "Reinicio de caja"));
         }
 
         salesLog = [];
@@ -2054,8 +2055,8 @@ async function closeDayAndResetLogs() {
                 console.log("Saving last day close timestamp to Supabase app_config...");
                 await window.SupabaseManager.upsertAppConfig({ lastCloseTime: nowStr });
             } else {
-                console.log("Database does not support last_close_time. Clearing daily sales and expenses from Supabase as fallback...");
-                await window.SupabaseManager.deleteSales(salesLog.map(s => s.uuid));
+                console.log("Database does not support last_close_time. Voiding daily sales and clearing expenses from Supabase as fallback...");
+                await Promise.all(salesLog.map(s => window.SupabaseManager.voidSale(s.uuid, "Cierre de jornada (sin soporte de last_close_time)")));
                 await window.SupabaseManager.deleteExpenses(expenses.map(e => e.uuid));
             }
         }
@@ -2301,7 +2302,7 @@ function restoreDefaultProducts() {
         
         if (window.SupabaseManager.isConfigured()) {
             products.forEach(p => window.SupabaseManager.deleteProduct(p.id));
-            salesLog.forEach(s => window.SupabaseManager.deleteSale(s.uuid));
+            salesLog.forEach(s => window.SupabaseManager.voidSale(s.uuid, "Restauración de productos por defecto"));
             expenses.forEach(e => window.SupabaseManager.deleteExpense(e.uuid));
             debts.forEach(d => window.SupabaseManager.deleteDebt(d.uuid));
             replenishments.forEach(r => window.SupabaseManager.deleteReplenishment(r.uuid));
@@ -2918,8 +2919,14 @@ async function handleRealtimeDbUpdate(tableName, payload) {
         startOfDay.setHours(0,0,0,0);
         const filterTime = lastCloseTime ? window.parseUTCTimestamp(lastCloseTime) : startOfDay;
 
-        if (eventType === 'DELETE') {
-            salesLog = salesLog.filter(s => s.uuid !== oldRow.uuid);
+        if (eventType === 'DELETE' || (newRow && newRow.voided_at)) {
+            // Plan B, Task 7: a voided sale (spec §5.2) must vanish from the
+            // register/reports exactly like the DELETE this used to only
+            // handle -- without this check the row stayed patched into
+            // salesLog with voided_at set but nothing here ever looks at
+            // that field, so it would keep counting toward totals forever.
+            const uuidToRemove = eventType === 'DELETE' ? oldRow.uuid : newRow.uuid;
+            salesLog = salesLog.filter(s => s.uuid !== uuidToRemove);
         } else {
             const saleDate = window.parseUTCTimestamp(newRow.timestamp);
             if (saleDate >= filterTime) {

@@ -754,14 +754,23 @@ ejecutar, no asumirlo de una fecha de spec pasada).
 ## Task 7: Anulación de venta — `voided_at` en vez de `DELETE`
 
 **Files:**
-- Modify: `js/supabase.js` — retirar `deleteSale` (572), `deleteSales`
-  (587), `deleteSalesByTimestamp` (621); agregar `voidSale(uuid, reason)`
-  y `voidSalesByTimestamp(timestamp, reason)`
-- Modify: `js/app.js` — `handleUndoSale` (823) y los ~15 call sites de
-  `deleteSale(s)`/`deleteSalesByTimestamp` (679, 746, 847, 1097, 2064, 2296
-  y los que aparezcan en la búsqueda final — confirmar el conteo exacto al
-  ejecutar, el inventario de arriba es del agente explorador, no
-  exhaustivo garantizado)
+- Modify: `js/supabase.js` — retirados `deleteSale`, `deleteSales`,
+  `deleteSalesByTimestamp`; agregados `voidSale(uuid, reason)` y
+  `voidSalesByTimestamp(timestamp, reason)`. `fetchSales()` (Task 4) y las
+  5 funciones de reportes online-only (`fetchStatsData`, `fetchPnlData`,
+  `fetchDayReport`, `fetchReportDays`, `fetchSalesHistory`) ahora filtran
+  `voided_at IS NULL`/`.is('voided_at', null)`.
+- Modify: `js/app.js` — el conteo real de call sites fue 7, no ~15:
+  `handleUndoSale` (826), el flujo de edición de cuenta en
+  `handleClearCart`/`handleCheckoutCart` (682/749), `clearAllSales` (1102),
+  el fallback muerto de `closeDayAndResetLogs` (2059, ver nota abajo),
+  `restoreDefaultProducts` (2305), y una rama muerta más en
+  `processOfflineQueue` (120, nunca alimentada por ningún `actionType:
+  'deleteSales'` real -- se eliminó en vez de convertirse). También:
+  `handleRealtimeDbUpdate`'s rama de `sales` (Realtime, no la de
+  `performFullFetch`) no filtraba `voided_at` -- una fila recién anulada se
+  quedaba viva en `salesLog` con `voided_at` seteado pero sin que nada lo
+  mirara ahí. Corregido.
 
 **Interfaces:**
 - Produces: `UPDATE sales SET voided_at = now(), void_reason = ? WHERE
@@ -770,22 +779,74 @@ ejecutar, no asumirlo de una fecha de spec pasada).
   vía PowerSync.
 - **Nunca `DELETE` de una fila ya sincronizada** (spec §5.2, regla dura).
 
-- [ ] **Step 1: `voidSale`/`voidSalesByTimestamp`**
-- [ ] **Step 2: Reescribir `handleUndoSale` y el flujo "Modificar cuenta"/"Corregir"**
+- [x] **Step 1: `voidSale`/`voidSalesByTimestamp`**
 
-  El flujo de "editar cuenta" (spec §5.2, "Editar una cuenta"): en vez de
-  `deleteSalesByTimestamp` + re-insert, anular cada fila de esa cuenta con
-  su `sale_return`, e insertar el set corregido como cuenta nueva. Ver
-  `handleUndoSale` (app.js:823) y los call sites en 679/746 para el flujo
-  real de "Corregir" (botón en ui.js:3534-3542).
+  Hallazgo real (navegador real, `casa-lucenzo-dev`): un mismo instante
+  puede llegar a estar guardado con formatos de texto distintos según por
+  dónde pasó -- `toISOString()` del lado del cliente da
+  `"...260Z"` (3 decimales), pero una vez que esa fila sube a Postgres y
+  vuelve a bajar por el sync stream de PowerSync, la vi re-almacenada
+  localmente como `"...260000Z"` (6 decimales, microsegundos). Un
+  `WHERE timestamp = ?` con comparación de string deja de matchear apenas
+  eso pasa -- y como `editingTimestamp` vive en `sessionStorage` durante
+  toda la edición de una cuenta, un re-sync de fondo (cada 3 min, o al
+  reconectar) en medio de una edición larga alcanza para gatillarlo. Se
+  cambió `voidSalesByTimestamp` a `WHERE julianday(timestamp) =
+  julianday(?)` -- confirmado en el navegador que normaliza ambos formatos
+  al mismo valor y que el `UPDATE ... RETURNING` (necesario para leer
+  `rowsAffected` real contra una vista, ver nota de Task 5) sigue
+  funcionando con esa comparación.
 
-- [ ] **Step 3: Actualizar reportes/caja para ignorar `voided_at IS NOT NULL`**
+  El camino Supabase-direct (fallback pre-primer-sync) no tiene este
+  problema -- PostgREST parsea el string a un valor real de `timestamptz`
+  antes de comparar, insensible al formato -- así que se dejó con
+  `.eq('timestamp', ...)` normal.
 
-  Cualquier query local (Task 4) que agregue `sales` debe filtrar
-  `WHERE voided_at IS NULL`.
+- [x] **Step 2: Reescribir `handleUndoSale` y el flujo "Modificar cuenta"/"Corregir"**
 
-- [ ] **Step 4: Test manual — anular, confirmar que no rompe el cierre del día**
-- [ ] **Step 5: Commit**
+  `handleUndoSale` además reemplaza el `updateProductStock` que había
+  quedado pendiente de Task 6 (justo el que ese Task dejó explícitamente
+  para acá) por `recordStockMovement(product, delta, 'sale_return',
+  sale.uuid)` -- reutiliza el helper de Task 6, con `source_uuid` =
+  la venta anulada. El tombstone local (`addDeletedSalesUuids`) se
+  mantuvo tal cual -- sigue protegiendo la misma condición de carrera que
+  protegía con `DELETE` (una anulación encolada offline que todavía no
+  llegó a Postgres, en el camino Supabase-direct), solo que ahora
+  antecede a un `voidSale` en vez de un `deleteSales`.
+
+- [x] **Step 3: Reportes/caja ignoran `voided_at IS NOT NULL`**
+
+  Filtro agregado en `fetchSales()` (ambas ramas) y en las 5 funciones de
+  reportes listadas arriba. Verificado en el navegador: una fila insertada
+  ya con `voided_at` seteado no aparece en el resultado de `fetchSales()`,
+  una sin `voided_at` sí.
+
+- [x] **Step 4: Verificación real contra `casa-lucenzo-dev`**
+
+  Login real (`test@casalucenzo.com`, Admin). Confirmado con lecturas
+  directas a Postgres antes/después:
+  - `voidSale`: fila nueva → anulada → `voided_at`/`void_reason` correctos
+    en Postgres.
+  - `voidSalesByTimestamp` sobre una cuenta de 2 filas: ambas anuladas en
+    un solo `UPDATE`, confirmado con `RETURNING`.
+  - El bug de formato de timestamp (arriba) se reprodujo primero
+    (`voidSalesByTimestamp` devolvía `false` con un timestamp "viejo" tras
+    un round-trip) y se confirmó resuelto con `julianday()` en una
+    repetición limpia del mismo escenario.
+  - `fetchSales()` excluye correctamente una fila con `voided_at` ya
+    seteado.
+  - Datos de prueba (`e2e-*`) borrados de Postgres al terminar -- a
+    diferencia de una venta real, un `DELETE` sobre filas creadas y
+    destruidas enteramente dentro de este test no viola la regla dura de
+    la spec (nunca existieron como venta real).
+
+  No se pudo probar el click real de "Deshacer" en el navegador
+  (`prompt()` nativo del checkout no es automatizable en este entorno, y
+  `handleUndoSale` no queda expuesto en `window`) -- se verificó en su
+  lugar cada pieza que compone ese flujo por separado (`voidSale`,
+  `recordStockMovement` ya verificado en Task 6, el tombstone sin tocar).
+
+- [x] **Step 5: Commit**
 
 ---
 
