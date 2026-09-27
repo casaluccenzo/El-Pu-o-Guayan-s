@@ -1471,9 +1471,73 @@ ejecutar, no asumirlo de una fecha de spec pasada).
   muestran un mensaje claro ("Necesitás conexión para ver esto") en vez del
   fallo silencioso/guard mudo de hoy.
 
-- [ ] **Step 1: Un helper `requireOnline(featureName)` reusable**
-- [ ] **Step 2: Aplicarlo a cada función de la lista**
-- [ ] **Step 3: Commit**
+- [x] **Step 1: Un helper `requireOnline(featureName)` reusable**
+
+  `js/app.js`, justo antes de `loadAndRenderExpensesTab` (primer caller):
+  `requireOnline(featureName)` — si hay Supabase configurado y
+  `navigator.onLine`, devuelve `true`; si no, dispara el toast
+  `"⚠️ ${featureName} requiere conexión a internet"` y devuelve `false`. Solo
+  para los casos de acción simple/toast (botones, tabs sin contenedor propio
+  de error) — las vistas que ya tenían o necesitaban un contenedor dedicado
+  (PnL, historial de reportes, dispositivos conectados) escriben su propio
+  mensaje en el contenedor en vez de sumar un toast redundante, tal como pide
+  el punto 2 del pedido original.
+
+- [x] **Step 2: Aplicarlo a cada función de la lista**
+
+  Investigación real (no la lista de line numbers del plan, que ya estaba
+  desactualizada) mostró que varias de estas ya degradaban bien y no
+  necesitaban tocarse — evitar tratar el inventario del plan como órdenes
+  literales, mismo criterio que en todas las tasks anteriores:
+  - `fetchStatsData` / `loadAndRenderAdminStats`: ya oculta los deltas
+    semanales en vez de mostrar un `0%` falso (`opts.fullHistory`,
+    `js/ui.js:2113`) — no es un fallo silencioso, es "menos información
+    pero nunca incorrecta". Sin cambios.
+  - `fetchActivityLogs` / `refreshActivityLogsView`: ya tiene su propio
+    fallback a un log local en `localStorage` (`casa_lucenzo_local_activity_logs`),
+    tanto dentro de la función como en su caller. Sin cambios.
+  - `fetchExpensesRange` / `loadAndRenderExpensesTab`: **sí** fallaba en
+    silencio — mostraba una vista parcial (solo el mes actual, desde
+    memoria) sin avisar que para cualquier otro mes eso podía estar
+    incompleto. Ahora usa `requireOnline` con un toast.
+  - `fetchPnlData` / `loadPnl`: ya distinguía "sin conexión" de "falló el
+    fetch" con su propio mensaje en el contenedor (spec §4.4) — le faltaba
+    el botón de reintentar en la rama offline (sí lo tenía la rama de fetch
+    fallido). Agregado.
+  - `fetchReportDays` / `openReportHistoryModal`: **hallazgo real, el
+    ejemplo exacto que dio Gemini** — offline mostraba "No se encontraron
+    reportes recientes.", indistinguible de 30 días genuinamente sin
+    actividad. Ahora un estado dedicado con botón reintentar. Verificado en
+    navegador real: offline → mensaje + reintentar; vuelta online →
+    reintentar trae el estado real ("No se encontraron reportes
+    recientes.", correcto porque dev no tiene reportes).
+  - `fetchDayReport` (botones "Ver"/WhatsApp del historial): ahora
+    `requireOnline` corta ANTES de intentar el fetch (y, en el de WhatsApp,
+    antes de abrir la pestaña en blanco) en vez de descubrir la falla
+    después.
+  - `fetchSalesHistory` / `loadAndRenderAnalytics`: ya degradaba a
+    `salesLog` (la ventana operativa local) sin romper nada, pero sin
+    avisar que ese dataset es más chico que el rango pedido. Sumado el
+    toast. Verificado en navegador real.
+  - `fetchActiveSessions` / `loadAndRenderActiveDevices`: **el otro caso
+    real** — offline no hacía nada (ni toast ni contenedor), dejando lo que
+    hubiera quedado renderizado antes (stale) o vacío en la primera carga.
+    Llamar a `renderActiveDevices([])` habría mostrado su propio "No hay
+    dispositivos registrados en el servidor." — exactamente el mismo
+    problema. Ahora escribe un mensaje dedicado en `#settings-devices-list`
+    sin pasar por esa función. Verificado en navegador real.
+
+  Firmas y tipos de retorno de las 7 funciones de `js/supabase.js` sin
+  tocar (siguen devolviendo `null`/`[]`), tal como pidió Gemini.
+
+- [x] **Step 3: Commit**
+
+  `npm run lint`: 0 errores. `npm test`: 100% verde. Verificado en
+  navegador real contra el build servido (no simulado) forzando
+  `navigator.onLine = false` vía `Object.defineProperty` — encontré en el
+  camino que el service worker servía una versión cacheada de `js/app.js`
+  hasta desregistrarlo + limpiar `caches` (mismo problema ya conocido de
+  Task 10). Sin errores nuevos en consola.
 
 ---
 

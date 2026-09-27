@@ -1327,6 +1327,22 @@ let pnlMode = 'week';       // 'week' | 'month'
 let pnlAnchor = new Date(); // any date inside the selected period
 let pnlLast = null;         // last rendered pnl (for the PDF button)
 
+// Plan B, Task 14 (spec §4): the historical/reporting reads below
+// (fetchStatsData, fetchExpensesRange, fetchPnlData, fetchDayReport,
+// fetchReportDays, fetchSalesHistory, fetchActiveSessions) go straight to
+// Postgres on purpose -- they're not part of PowerSync's sync stream, so
+// there's no local fallback for them, ever. Before this task they either
+// silently returned []/null (a real network failure looks identical to "no
+// data exists" -- e.g. fetchReportDays offline used to render "No se
+// encontraron reportes recientes", which reads as "nothing happened" when
+// really it's "couldn't ask the server") or, in a couple of spots, just did
+// nothing at all. This makes the "no conexión" case explicit instead.
+function requireOnline(featureName) {
+    if (window.SupabaseManager.isConfigured() && navigator.onLine) return true;
+    window.UIManager.showToast(`⚠️ ${featureName} requiere conexión a internet`, "fa-solid fa-wifi-slash");
+    return false;
+}
+
 async function loadAndRenderExpensesTab(forceRefetch = false) {
     if (currentRole !== 'admin') return;
     const monthInput = document.getElementById('admin-expense-filter-month');
@@ -1336,11 +1352,15 @@ async function loadAndRenderExpensesTab(forceRefetch = false) {
 
     if (forceRefetch) delete expensesTabCache[month];
     if (!Array.isArray(expensesTabCache[month])) {
-        if (window.SupabaseManager.isConfigured() && navigator.onLine) {
+        if (requireOnline('Ver gastos de otros meses')) {
             const start = new Date(month + '-01T00:00:00');
             const end = new Date(start); end.setMonth(end.getMonth() + 1);
             expensesTabCache[month] = await window.SupabaseManager.fetchExpensesRange(start.toISOString(), end.toISOString());
         } else {
+            // Best-effort degraded view: whatever's in the local operational
+            // window (Task 5's local-first expenses) -- complete for the
+            // current month, but silently partial for any other month. The
+            // toast above is what keeps that from reading as "gastos: $0".
             expensesTabCache[month] = expenses.filter(e => (e.timestamp || '').slice(0, 7) === month);
         }
     }
@@ -1474,7 +1494,9 @@ async function loadPnl(forceRefetch = false) {
             }
             sales = data.sales; expenses = data.expenses;
         } else if (container) {
-            container.innerHTML = `<div style="font-size:0.85rem; color:var(--color-danger); text-align:center; padding:1.5rem 0;">Sin conexión — el resumen necesita datos del servidor.</div>`;
+            container.innerHTML = `<div style="font-size:0.85rem; color:var(--color-danger); text-align:center; padding:1.5rem 0;">Sin conexión — el resumen necesita datos del servidor.<br><button id="btn-pnl-retry-offline" class="btn-action-small" style="margin-top:0.75rem;"><i class="fa-solid fa-rotate"></i> Reintentar</button></div>`;
+            const retryBtn = document.getElementById('btn-pnl-retry-offline');
+            if (retryBtn) retryBtn.addEventListener('click', () => loadPnl(true));
             return;
         }
         pnlCache[key] = window.AnalyticsManager.aggregatePnl(sales, expenses, products, {
@@ -1833,6 +1855,23 @@ async function openReportHistoryModal() {
         return;
     }
 
+    // Plan B, Task 14: fetchReportDays goes straight to Postgres (not part of
+    // PowerSync's sync stream) -- offline it silently returned [], and the
+    // empty-state below read as "No se encontraron reportes recientes",
+    // indistinguishable from a genuinely quiet 30 days. Distinguish them.
+    if (!navigator.onLine) {
+        body.innerHTML = `
+            <div style="text-align: center; padding: 2rem 0; color: var(--color-text-muted); font-size: 0.8125rem;">
+                <i class="fa-solid fa-wifi-slash" style="font-size: 1.5rem; margin-bottom: 0.5rem; display: block; color: var(--color-danger);"></i>
+                Sin conexión — el historial de reportes necesita datos del servidor.
+                <br><button id="btn-report-history-retry-offline" class="btn-action-small" style="margin-top:0.75rem;"><i class="fa-solid fa-rotate"></i> Reintentar</button>
+            </div>
+        `;
+        const retryBtn = document.getElementById('btn-report-history-retry-offline');
+        if (retryBtn) retryBtn.addEventListener('click', () => openReportHistoryModal());
+        return;
+    }
+
     const days = await window.SupabaseManager.fetchReportDays(30);
 
     if (!days || days.length === 0) {
@@ -1893,6 +1932,7 @@ async function openReportHistoryModal() {
             const dateStr = e.currentTarget.dataset.date;
             const formattedDate = formatReportDateStr(dateStr);
             triggerHaptic(15);
+            if (!requireOnline('Ver el reporte de un día anterior')) return;
             btn.innerHTML = '<i class="fa-solid fa-spinner fa-spin"></i>';
             const report = await window.SupabaseManager.fetchDayReport(dateStr);
             if (report) {
@@ -1914,6 +1954,7 @@ async function openReportHistoryModal() {
             const dateStr = e.currentTarget.dataset.date;
             const formattedDate = formatReportDateStr(dateStr);
             triggerHaptic(15);
+            if (!requireOnline('Enviar el reporte por WhatsApp')) return;
             btn.innerHTML = '<i class="fa-solid fa-spinner fa-spin"></i>';
             // Same Safari/iPadOS quirk as the day-close confirm button: open the
             // tab before the await below so it stays authorized by the click.
@@ -2617,7 +2658,12 @@ async function loadAndRenderAnalytics(forceRefetch = false) {
                 analyticsSalesCache[analyticsRangeDays] = [];
             }
         } else {
-            // Offline / not configured: fall back to whatever is already in memory
+            // Offline / not configured: fall back to whatever is already in
+            // memory (the current operational window, not the requested
+            // range) -- the toast is what keeps a shorter/emptier-than-
+            // expected chart from reading as "poco se vendió" instead of
+            // "no se pudo traer el historial completo".
+            requireOnline('El historial completo de Análisis');
             analyticsSalesCache[analyticsRangeDays] = salesLog;
         }
     }
@@ -3684,10 +3730,26 @@ async function refreshMySession() {
  */
 async function loadAndRenderActiveDevices() {
     if (currentRole !== 'admin') return;
-    if (window.SupabaseManager.isConfigured() && navigator.onLine) {
-        const sessions = await window.SupabaseManager.fetchActiveSessions();
-        window.UIManager.renderActiveDevices(sessions, myDeviceId, handleEjectDevice, handleTrustDevice);
+    // Plan B, Task 14: this used to just do nothing when offline, leaving
+    // whatever was rendered last (stale) or a blank panel on first open. A
+    // plain empty sessions array would be worse -- renderActiveDevices'
+    // own empty-state says "No hay dispositivos registrados en el
+    // servidor.", exactly the misleading "nothing exists" reading this task
+    // is about. Write the container directly instead of routing through it.
+    if (!window.SupabaseManager.isConfigured() || !navigator.onLine) {
+        const listDiv = document.getElementById('settings-devices-list');
+        if (listDiv) {
+            listDiv.innerHTML = `
+                <div style="text-align: center; padding: 1rem 0; color: var(--color-text-muted); font-size: 0.75rem;">
+                    <i class="fa-solid fa-wifi-slash" style="margin-right: 0.35rem;"></i>
+                    Sin conexión — necesitás internet para ver los dispositivos conectados.
+                </div>
+            `;
+        }
+        return;
     }
+    const sessions = await window.SupabaseManager.fetchActiveSessions();
+    window.UIManager.renderActiveDevices(sessions, myDeviceId, handleEjectDevice, handleTrustDevice);
 }
 
 /**
