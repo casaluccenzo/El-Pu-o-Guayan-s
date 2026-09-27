@@ -952,15 +952,51 @@ ejecutar, no asumirlo de una fecha de spec pasada).
 > que se vacía; y el stock se resetea solo vía el trigger. Lo único que
 > queda es: insertar `day_closes`, refrescar BCV, re-renderizar.
 
-- [ ] **Step 1: Reescribir `closeDayAndResetLogs`**
-- [ ] **Step 2: Actualizar los reportes que hoy leen `salesLog`/`expenses` como arrays acotados al día**
+- [x] **Step 1: Reescribir `closeDayAndResetLogs`**
 
-  Deben pasar a filtrar por `timestamp > last_close_at()` en la query local,
-  no depender de que el array se vació.
+  Implementado distinto al "nada más" del enunciado original, por una razón
+  de spec, no de gusto: `trg_day_close_recompute` (migración 030) sí
+  recalcula todos los productos solo, pero recién CUANDO el `INSERT` de
+  `day_closes` llega a correr en Postgres -- y `insertDayClose` (local-first,
+  Task 3) puede tardar en subir mientras el dispositivo está offline. La
+  spec (R1) exige vender/operar offline hasta un día entero, así que un
+  cierre hecho sin conexión necesita mostrar la vitrina de pastelitos en
+  cero DE INMEDIATO, no recién al reconectar. Se mantuvo la mutación local
+  (`p.stock = 0`, etc., puro JS, sin red) para eso, pero se sacaron las 2
+  llamadas a `updateProductStock(...)` que la acompañaban -- esas sí
+  competían con el trigger por las mismas columnas (mismo tipo de conflicto
+  de doble escritura que Task 6), y ya no hacen falta porque
+  `insertDayClose` es quien de verdad mueve la frontera en Postgres. El
+  resto (vaciar `salesLog`/`expenses`, limpiar storage, refrescar BCV) se
+  dejó igual: son puramente locales, nunca compitieron con nada del lado
+  del servidor.
 
-- [ ] **Step 3: Dos dispositivos cerrando offline (spec §9 manual)** — confirmar
-      que dos filas en `day_closes` no rompen nada, gana la más nueva.
-- [ ] **Step 4: Commit**
+- [x] **Step 2: N/A -- ya estaba resuelto**
+
+  Investigado antes de tocar código: `currentSalesExpensesFilterTime()`
+  (`js/supabase.js`) y el `lastCloseTime` global (`js/app.js`) ya filtran
+  `fetchSales`/`fetchExpenses`, el merge de `loadAllDataFromSupabase`, y los
+  dos handlers de Realtime (`sales`/`expenses`) por la hora del último
+  cierre -- ninguno de ellos depende de que `salesLog`/`expenses` se vacíen
+  a mano, ya filtran por fecha de por sí. Vaciar esos arrays en
+  `closeDayAndResetLogs` sigue siendo puramente cosmético (feedback
+  instantáneo en pantalla), no una dependencia oculta -- no había nada que
+  migrar acá.
+
+- [x] **Step 3: Verificación real — dos cierres (spec §9)**
+
+  Simulado en `casa-lucenzo-dev` con `insertDayClose` desde dos
+  `device_id` distintos: ambas filas quedaron en `day_closes` (nada se
+  pisa, es append-only), y el producto de prueba recalculó correctamente
+  a stock 0 después de cada cierre. Se probó además el caso más duro --
+  una fila de cierre vieja que llega TARDE y fuera de orden (simulando un
+  upload demorado) después de que ya hubo actividad nueva -- y
+  `last_close_at() = MAX(closed_at)` la ignoró correctamente sin revertir
+  el estado ya avanzado. No hizo falta ningún código nuevo para esto: es
+  una consecuencia natural del modelo append-only ya construido en
+  Tasks 2/3.
+
+- [x] **Step 4: Commit**
 
 ---
 

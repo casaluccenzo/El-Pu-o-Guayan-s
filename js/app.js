@@ -2102,6 +2102,20 @@ async function closeDayAndResetLogs() {
         window.StorageManager.clearConsumedReplenishmentUuids();
 
         // 4. Reset showcase products' stock: Pastelitos reset to 0, Packaged items (bebidas, dulces) keep their actual remaining stock
+        //
+        // Plan B, Task 9: this no longer persists anything to Postgres.
+        // insertDayClose() above (Step 1b) is what actually moves the real
+        // boundary -- trg_day_close_recompute (migration 030) fires on that
+        // INSERT and recalculates every product's stock/initial_stock/max
+        // itself, straight from stock_movements, the same formula this loop
+        // used to hand-replicate with a direct updateProductStock() write.
+        // Calling that here too would race the trigger over the same
+        // columns (the exact double-write conflict Task 6 was about) -- but
+        // dropping the in-memory mutation entirely isn't safe either: the
+        // trigger only runs once insertDayClose's upload actually reaches
+        // Postgres, and this app has to work offline for a full day (spec
+        // R1). Keeping this pure local assignment is what makes Cocina see
+        // the reset vitrina immediately even before the close has synced.
         products.forEach(p => {
             const cat = p.category || (window.StorageManager ? window.StorageManager.getProductCategory(p) : 'pastelitos');
             if (cat === 'pastelitos') {
@@ -2111,15 +2125,9 @@ async function closeDayAndResetLogs() {
                 // Left standing it accumulated, and Cocina kept asking for
                 // batches nobody had loaded.
                 p.max = 0;
-                if (window.SupabaseManager.isConfigured()) {
-                    window.SupabaseManager.updateProductStock(p.id, 0, 0, 0);
-                }
             } else {
                 // Keep actual remaining stock for drinks/sweets
                 p.initial_stock = p.stock || 0;
-                if (window.SupabaseManager.isConfigured()) {
-                    window.SupabaseManager.updateProductStock(p.id, p.stock, p.max, p.initial_stock);
-                }
             }
         });
         // 4.5. Ensure BCV automatic exchange connector is active and refreshed
