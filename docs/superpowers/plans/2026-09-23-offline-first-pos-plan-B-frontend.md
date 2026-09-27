@@ -520,12 +520,74 @@ ejecutar, no asumirlo de una fecha de spec pasada).
 > van acá — esas son la Task 6 (el modelo append-only), porque tocan la
 > regla "guardar lo que pasó", no un CRUD genérico.
 
-- [ ] **Step 1: Reescribir cada función**
+- [x] **Step 1: Reescribir cada función**
+
+  Patrón: si `getLocalDb()` devuelve una db (ya sincronizada), escribe SOLO
+  ahí (sin caer al Supabase-direct aunque falle -- mismo criterio que los
+  `fetch*` de Task 4) y hace `return`; si no, corre el código Supabase-direct
+  + `enqueueOfflineOp` de siempre, sin tocar. Se eliminó el
+  `navigator.onLine`/`enqueueOfflineOp` manual del lado local -- PowerSync
+  encola solo, tal como dice la nota de Interfaces arriba.
+
+  Tres hallazgos reales (navegador real, `casa-lucenzo-dev`, sin login --
+  probado con `window.PowerSyncManager.db.execute(...)` directo, ver detalle
+  en el historial de conversación):
+
+  1. **Las tablas locales de PowerSync son VISTAS, no tablas.**
+     `INSERT ... ON CONFLICT(id) DO UPDATE SET ...` tira literalmente
+     `"cannot UPSERT a view"` -- no es un límite documentado, se encontró
+     recién al probarlo. Se reemplazó por `INSERT OR REPLACE`, que sí
+     funciona contra la vista. Se verificó con `db.getNextCrudTransaction()`
+     que `INSERT OR REPLACE` sobre una fila existente genera un solo `PUT`
+     (no un `DELETE`+`PUT`), así que no arriesga violar la FK real
+     `stock_movements.product_id -> products.id` (que un DELETE real sí
+     rompería si el producto tiene movimientos).
+  2. **`location_id` (migración 016b) es NOT NULL sin default en SQLite.**
+     Los 5 columns reales de Postgres para `products`/`ingredients`/`debts`/
+     `expenses`/`replenishments` tienen default
+     `00000000-0000-0000-0000-000000000001` (única location existente), pero
+     `schema.js` no declara defaults de columna. Un INSERT local nuevo que no
+     la mencione la deja en NULL, y ese NULL explícito sube tal cual en el
+     PUT -- Postgres lo rechaza (23502 not_null_violation) y `connector.js`
+     descarta el error sin reintentar: la fila se pierde para siempre en
+     Postgres aunque localmente pareciera haberse guardado bien. Se agregó
+     `DEFAULT_LOCATION_ID` como constante compartida, seteada explícitamente
+     en cada INSERT/REPLACE de esas 5 tablas.
+  3. **`products` tiene columnas sombra** (`stock_computed`,
+     `initial_stock_computed`, `max_computed`, migración 029) que
+     `upsertProduct` nunca tocó -- las mantiene un trigger de Postgres.
+     `INSERT OR REPLACE` reescribe la fila entera, así que sin releerlas
+     antes quedarían NULL localmente y ese NULL pisaría el valor real al
+     subir. `upsertProduct` ahora hace un `getOptional` de esas 3 columnas
+     antes del REPLACE y las reinserta tal cual. Verificado en el navegador
+     que sobrevive un ciclo insert→update.
+
+  Hallazgo aparte, no de Plan B pero encontrado al tocar `upsertAppConfig`:
+  `pin_local`/`pin_cocina`/`pin_admin` (el sistema viejo de PIN por rol,
+  `js/app.js` línea ~5053) **no son columnas reales de `app_config`** --
+  nunca se agregaron en ninguna migración (confirmado contra
+  `000_core_tables.sql` y el esquema real vía `list_tables`). Ese guardado ya
+  viene fallando en silencio en producción desde antes de Plan B (PostgREST
+  rechaza la columna inexistente, queda enganchado en el offline queue para
+  siempre). No se tocó -- ni se "arregló" ni se replicó localmente (`schema.js`
+  tampoco las declara) -- queda fuera de este Task, a decidir si todavía hace
+  falta ese sistema de PIN o ya lo reemplazó el de `profiles.pin_hash`.
+
+- [x] **Step 1b: Verificación en navegador (sin login)**
+
+  Cada `INSERT OR REPLACE`/`DELETE`/`UPDATE` de las 10 funciones se probó
+  literalmente contra `window.PowerSyncManager.db` en un navegador real
+  (insert nuevo, upsert sobre existente, delete, batch delete con `IN`), más
+  `lint`/`npm test` limpios. Lo que NO se pudo probar sin las credenciales de
+  login de `casa-lucenzo-dev` a mano es el round-trip real a Postgres
+  (`uploadData` vía `connector.js`) -- eso queda en el Step 2 de abajo.
+
 - [ ] **Step 2: Test manual — dos pestañas offline (spec §9, "manual")**
 
   Dos pestañas del navegador en modo avión, cada una hace un cambio (p.ej.
   editar dos productos distintos), reconectar, confirmar que ambos cambios
-  llegan a Postgres dev sin pisarse.
+  llegan a Postgres dev sin pisarse. Pendiente: requiere login real, no se
+  pudo correr en esta sesión.
 
 - [ ] **Step 3: Commit**
 
