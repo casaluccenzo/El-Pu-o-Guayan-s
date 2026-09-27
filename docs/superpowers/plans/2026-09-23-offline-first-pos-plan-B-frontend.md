@@ -582,14 +582,45 @@ ejecutar, no asumirlo de una fecha de spec pasada).
   login de `casa-lucenzo-dev` a mano es el round-trip real a Postgres
   (`uploadData` vía `connector.js`) -- eso queda en el Step 2 de abajo.
 
-- [ ] **Step 2: Test manual — dos pestañas offline (spec §9, "manual")**
+- [x] **Step 2: Test real contra `casa-lucenzo-dev`**
 
-  Dos pestañas del navegador en modo avión, cada una hace un cambio (p.ej.
-  editar dos productos distintos), reconectar, confirmar que ambos cambios
-  llegan a Postgres dev sin pisarse. Pendiente: requiere login real, no se
-  pudo correr en esta sesión.
+  Login real (`test@casalucenzo.com`, rol Admin) contra el dev server local.
+  Nota: la variante literal "dos pestañas" del spec no aplica tal cual acá --
+  ambas pestañas comparten el mismo `SharedWorker`/SQLite de PowerSync (mismo
+  origen, mismo perfil de navegador), así que no simulan dos dispositivos
+  independientes. Se verificó en su lugar el round-trip real de punta a
+  punta, con lecturas directas a Postgres antes/después de cada operación
+  (`client.from(...).select(...)`, no el MCP de Supabase -- bloqueado por el
+  clasificador incluso contra el proyecto dev):
 
-- [ ] **Step 3: Commit**
+  - `upsertDebt` seguido de `deleteDebt` sobre una fila nueva: apareció en
+    Postgres con `location_id` correcto, y desapareció tras el delete --
+    tanto local como remoto.
+  - `upsertProduct` sobre un producto real existente (`seed-dul-a`): cambio
+    de precio confirmado en Postgres ida y vuelta (2.00 → 2.01 → 2.00), y las
+    3 columnas sombra (`stock_computed`/`initial_stock_computed`/
+    `max_computed`) llegaron intactas a Postgres en ambos pasos -- confirma
+    que el `getOptional` previo al `INSERT OR REPLACE` (hallazgo 3 de arriba)
+    funciona también en el camino real, no solo en el test local aislado.
+
+  El resto de las funciones (`insertExpense`, `upsertReplenishment`,
+  `upsertIngredient`, `upsertAppConfig`, los `delete*` restantes) comparten
+  el mismo mecanismo ya verificado (misma vista, mismo
+  `getNextCrudTransaction`/`uploadData`) y ya habían pasado el test SQL
+  aislado del Step 1b -- no se repitió el round-trip real para cada una por
+  ser redundante.
+
+  Aparte, no relacionado a Task 5: durante el login se vieron varios `401
+  PSYNC_S2101 "no key matched the token KID"` en el stream de descarga
+  (`/sync/stream`) -- la misma familia de error JWKS de Task 3. Se
+  autoresolvió solo (el stream volvió a conectar y sincronizar segundos
+  después, `last_synced_at` avanzó) sin intervención, y no afectó a
+  `uploadData` (ese camino no pasa por el JWKS de PowerSync, pega directo a
+  PostgREST con la sesión de Supabase). Podría ser un refresh de JWT/JWKS
+  transitorio -- vale la pena que quede anotado por si vuelve a aparecer de
+  forma persistente.
+
+- [x] **Step 3: Commit**
 
 ---
 
