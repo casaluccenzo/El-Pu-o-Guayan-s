@@ -39,7 +39,14 @@ La app de escritorio toma nombre, appId, ícono y repo de releases de
 `img/brands/<BRAND>/brand.json` (bloque `desktop`, ver
 `desktop/brand-config.js`). Sin `BRAND` sale Casa Lucenzo como siempre.
 
-Para El Puño Guayanés, desde una PC con Windows y en una terminal con estas
+Para El Puño Guayanés lo más simple es GitHub Actions: en el repo,
+Actions → "Release escritorio" → Run workflow. Compila en Windows y publica la
+versión de `package.json` en Releases. Necesita una sola vez el secret
+`SUPABASE_ANON_KEY` (y opcional `SENTRY_DSN`) en Settings → Secrets and
+variables → Actions, con el mismo valor que tiene el proyecto de El Puño en
+Vercel. Sin la key el workflow corta antes de publicar.
+
+A mano, desde una PC con Windows y en una terminal con estas
 variables (`BRAND` y las mismas `SUPABASE_URL`, `SUPABASE_ANON_KEY`,
 `POWERSYNC_URL` y `SENTRY_DSN` que tiene el proyecto de El Puño en Vercel, porque
 el `.exe` lleva una copia congelada de `www/`; sin ellas la app queda apuntando
