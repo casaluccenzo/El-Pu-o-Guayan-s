@@ -2421,25 +2421,6 @@ async function loadAllDataFromSupabase() {
         products = window.StorageManager.loadProducts();
     }
 
-    let missingDefaultProds = [];
-    window.StorageManager.DEFAULT_PRODUCTS.forEach(defProd => {
-        if (!products.some(p => p.id === defProd.id)) {
-            // Seeded stock counts as loaded, so the baseline starts level with
-            // it -- otherwise the product reads as fully sold from minute one.
-            const seeded = { ...defProd, initial_stock: defProd.stock };
-            products.push(seeded);
-            missingDefaultProds.push(seeded);
-        }
-    });
-
-    if (missingDefaultProds.length > 0) {
-        console.log(`Auto-added ${missingDefaultProds.length} missing default products to stock.`);
-        if (window.SupabaseManager.isConfigured()) {
-            missingDefaultProds.forEach(p => {
-                window.SupabaseManager.upsertProduct(p);
-            });
-        }
-    }
     window.StorageManager.saveProducts(products);
     
     // Save and load sales (merge local sales if any were saved offline or during schema mismatch)

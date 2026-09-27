@@ -82,18 +82,6 @@ function loadProducts() {
                 return JSON.parse(JSON.stringify(DEFAULT_PRODUCTS));
             }
 
-            // Auto-merge missing default products (e.g. dulces)
-            let updated = false;
-            DEFAULT_PRODUCTS.forEach(defProd => {
-                if (!parsed.some(p => p.id === defProd.id)) {
-                    parsed.push({ ...defProd });
-                    updated = true;
-                }
-            });
-            if (updated) {
-                saveProducts(parsed);
-            }
-
             return parsed.map(p => ({
                 ...p,
                 price: p.price !== undefined ? parseFloat(p.price) : 1.50,
