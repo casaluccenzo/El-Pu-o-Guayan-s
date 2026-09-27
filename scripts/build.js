@@ -76,6 +76,25 @@ if (fs.existsSync(supabaseBuildFile)) {
     }
 }
 
+// js/powersync/connector.js carries the same __POWERSYNC_URL__ placeholder
+// pattern as supabase.js, but this injection was never wired up -- the
+// placeholder was shipping to every deploy unreplaced, so PowerSync never
+// connected in production (the app degrades to the Supabase-direct fallback
+// paths in js/supabase.js, which is why nothing visibly broke).
+const powersyncBuildFile = path.join(destDir, 'js', 'powersync', 'connector.js');
+if (fs.existsSync(powersyncBuildFile)) {
+    const envPowerSyncUrl = process.env.POWERSYNC_URL;
+
+    if (envPowerSyncUrl) {
+        let content = fs.readFileSync(powersyncBuildFile, 'utf8');
+        content = content.replace('__POWERSYNC_URL__', envPowerSyncUrl);
+        fs.writeFileSync(powersyncBuildFile, content, 'utf8');
+        console.log('🔒 POWERSYNC_URL injected into www/js/powersync/connector.js');
+    } else {
+        console.warn('⚠️ POWERSYNC_URL not set — leaving placeholder unreplaced (PowerSync will not connect unless prefs.powerSyncUrl is set locally).');
+    }
+}
+
 if (fs.existsSync(indexBuildFile)) {
     let indexContent = fs.readFileSync(indexBuildFile, 'utf8');
     const sentryDsn = process.env.SENTRY_DSN;
