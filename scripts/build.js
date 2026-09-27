@@ -43,6 +43,55 @@ const appVersion = require('../package.json').version;
 injectVersion(destDir, appVersion);
 console.log(`🏷️  Versión ${appVersion} inyectada en www/`);
 
+// Per-deployment branding (BRAND env var), same pattern as SUPABASE_URL/
+// POWERSYNC_URL: this codebase now serves more than one business off the
+// same Vercel project family, and "Casa Lucenzo" was hardcoded into the
+// logo files and into several user-facing strings. img/brands/<BRAND>/
+// holds that tenant's logo.jpg/logo-192.png/logo-512.png plus a brand.json
+// with the display text; when unset, nothing here runs and Casa Lucenzo's
+// own default assets/strings ship untouched.
+const brand = process.env.BRAND;
+if (brand) {
+    const brandDir = path.join(srcDir, 'img', 'brands', brand);
+    if (fs.existsSync(brandDir)) {
+        for (const f of fs.readdirSync(brandDir)) {
+            if (f === 'brand.json') continue;
+            fs.copyFileSync(path.join(brandDir, f), path.join(destDir, 'img', f));
+        }
+
+        const brandMetaPath = path.join(brandDir, 'brand.json');
+        if (fs.existsSync(brandMetaPath)) {
+            const meta = JSON.parse(fs.readFileSync(brandMetaPath, 'utf8'));
+
+            const manifestPath = path.join(destDir, 'manifest.json');
+            const manifest = JSON.parse(fs.readFileSync(manifestPath, 'utf8'));
+            manifest.name = `Sistema de Stock Fácil - ${meta.displayName}`;
+            manifest.short_name = meta.shortName || manifest.short_name;
+            manifest.description = meta.description || manifest.description;
+            fs.writeFileSync(manifestPath, JSON.stringify(manifest, null, 2));
+
+            // "Casa Lucenzo"/"Casa Luccenzo" only ever appear as user-facing
+            // copy (title, footer, About dialog) in these files -- never as
+            // an identifier -- so a blanket string replace is safe here.
+            // Luc{1,2}enzo covers both the correct spelling and the "Luccenzo"
+            // typo that made it into some of these files.
+            const textFiles = ['index.html', 'pedido.html', 'qr-mesa.html', path.join('sistema', 'index.html')];
+            for (const rel of textFiles) {
+                const p = path.join(destDir, rel);
+                if (!fs.existsSync(p)) continue;
+                let content = fs.readFileSync(p, 'utf8');
+                content = content.replace(/Casa Luc{1,2}enzo/g, meta.displayName);
+                fs.writeFileSync(p, content, 'utf8');
+            }
+            console.log(`🎨 Branding "${brand}" aplicado (${meta.displayName})`);
+        } else {
+            console.log(`🎨 Branding "${brand}" aplicado (solo imágenes, sin brand.json)`);
+        }
+    } else {
+        console.warn(`⚠️ BRAND="${brand}" definido pero img/brands/${brand}/ no existe -- se usa el branding por defecto.`);
+    }
+}
+
 // Perform environment variable placeholder injection for production www/ build
 const supabaseBuildFile = path.join(destDir, 'js', 'supabase.js');
 // The Sentry init + __SENTRY_DSN__ placeholder lives in the internal POS app
