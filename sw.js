@@ -29,6 +29,32 @@ const SCRIPTS = [
   'desktop.js'
 ].map(file => `/js/${file}?v=${APP_VERSION}`);
 
+// Plan B: PowerSync's SQLite worker + WASM, vendored locally (js/powersync/
+// vendor/, via `npx @powersync/web copy-assets`) because it can't be loaded
+// cross-origin (see js/powersync/client.js). Fetched without a ?v= -- the
+// worker's own internal imports reference these by their real relative
+// paths, no query string involved. schema.js is imported by client.js the
+// same way (no ?v= either). connector.js/client.js get one like every other
+// same-origin script above.
+const POWERSYNC_VENDORED = [
+  '@powersync/AccessHandlePoolVFS-BPUHfZME.js',
+  '@powersync/FacadeVFS-d1ZDvud7.js',
+  '@powersync/IDBBatchAtomicVFS-DbkDb777.js',
+  '@powersync/MemoryVFS-DVJL5F8j.js',
+  '@powersync/OPFSCoopSyncVFS-BgTiWPfa.js',
+  '@powersync/OPFSWriteAheadVFS-BW9pqSNn.js',
+  '@powersync/assets/mc-wa-sqlite-BHScYYZw.wasm',
+  '@powersync/assets/mc-wa-sqlite-async-DdlQmAUV.wasm',
+  '@powersync/assets/wa-sqlite-CIxTmRHQ.wasm',
+  '@powersync/assets/wa-sqlite-async-zc68fxQq.wasm',
+  '@powersync/mc-wa-sqlite-PubB6u8c.js',
+  '@powersync/mc-wa-sqlite-async-DJG_ANKO.js',
+  '@powersync/wa-sqlite-D1_4mGs8.js',
+  '@powersync/wa-sqlite-async-BxkwNY-2.js',
+  '@powersync/websockets-Q8W_lerF.js',
+  '@powersync/worker.js'
+].map(file => `/js/powersync/vendor/${file}`);
+
 const ASSETS_TO_CACHE = [
   '/sistema/',
   '/sistema/index.html',
@@ -39,6 +65,10 @@ const ASSETS_TO_CACHE = [
   '/css/layout.css',
   '/css/components.css',
   ...SCRIPTS,
+  `/js/powersync/connector.js?v=${APP_VERSION}`,
+  `/js/powersync/client.js?v=${APP_VERSION}`,
+  '/js/powersync/schema.js',
+  ...POWERSYNC_VENDORED,
   '/img/logo-192.png',
   '/img/logo-512.png'
 ];

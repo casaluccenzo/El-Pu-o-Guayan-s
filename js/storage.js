@@ -230,6 +230,60 @@ function savePreferences(prefs) {
     }
 }
 
+// ================= PIN LOCKOUT (Plan B, Task 10) =================
+//
+// Per-user, persisted across reloads -- unlike the in-memory lockoutUntil/
+// failedPinAttempts pair handleUserLogin() uses (a full password login is
+// inherently online-only, so that one wasn't touched by this task).
+// Deliberately local-only: profiles.pin_failed_attempts/pin_locked_until in
+// Postgres are only ever written by the SECURITY DEFINER PIN RPCs, because
+// the one UPDATE policy on profiles requires role='admin' (migración 001) --
+// a plain client-side write here for a non-admin user would just get
+// silently rejected by RLS once PowerSync tried to upload it. Keeping this
+// counter local-only sidesteps that instead of fighting it.
+const PIN_LOCKOUT_KEY_PREFIX = 'casa_lucenzo_pin_lockout_';
+
+function loadPinLockoutState(userId) {
+    try {
+        const raw = localStorage.getItem(PIN_LOCKOUT_KEY_PREFIX + userId);
+        if (!raw) return { attempts: 0, lockedUntil: null };
+        const parsed = JSON.parse(raw);
+        return { attempts: parsed.attempts || 0, lockedUntil: parsed.lockedUntil || null };
+    } catch (e) {
+        return { attempts: 0, lockedUntil: null };
+    }
+}
+
+function savePinLockoutState(userId, state) {
+    try {
+        localStorage.setItem(PIN_LOCKOUT_KEY_PREFIX + userId, JSON.stringify(state));
+    } catch (e) {
+        console.error("Failed to save PIN lockout state", e);
+    }
+}
+
+// ================= AUTH FRESHNESS (Plan B, Task 11) =================
+//
+// Last time this device proved it was actually online AND authenticated --
+// updated only on SIGNED_IN/TOKEN_REFRESHED (js/supabase.js init()), never
+// on INITIAL_SESSION (that one just reflects whatever's cached in storage,
+// which could be read fully offline and would silently reset this clock).
+// AuthManager.isOfflineLimitExceeded (js/auth.js) reads this to enforce the
+// 30-day rule (spec §6, "Bordes").
+const LAST_AUTH_ONLINE_KEY = 'casa_lucenzo_last_auth_online_at';
+
+function loadLastAuthOnlineAt() {
+    return localStorage.getItem(LAST_AUTH_ONLINE_KEY) || null;
+}
+
+function saveLastAuthOnlineAt(isoString) {
+    try {
+        localStorage.setItem(LAST_AUTH_ONLINE_KEY, isoString);
+    } catch (e) {
+        console.error("Failed to save last auth online timestamp", e);
+    }
+}
+
 const BCV_PREFS_KEY = 'casa_lucenzo_bcv_prefs';
 
 function loadBcvPreferences() {
@@ -475,6 +529,10 @@ window.StorageManager = {
     saveCostInsumos,
     loadPreferences,
     savePreferences,
+    loadPinLockoutState,
+    savePinLockoutState,
+    loadLastAuthOnlineAt,
+    saveLastAuthOnlineAt,
     loadBcvPreferences,
     saveBcvPreferences,
     loadBcvLastFetch,

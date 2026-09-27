@@ -54,6 +54,29 @@
          in sw.js -- the service worker keys its cache by the exact request URL,
          so a stale ?v= here means users keep running old JS. -->
     <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
+    <!-- Plan B, Task 10: bcryptjs, pure JS/zero deps, for local PIN
+         verification (js/supabase.js:verifyQuickPin). Verified in a real
+         browser that its UMD build exposes window.bcrypt via a plain
+         classic <script> (no bundler/module system needed), and that
+         bcrypt.compareSync() correctly validates a real hash pgcrypto's
+         crypt(pin, gen_salt('bf')) produced -- same bcrypt spec on both
+         sides. Pinned to an exact version like @powersync/web above. -->
+    <script src="https://cdn.jsdelivr.net/npm/bcryptjs@3.0.3/umd/index.js"></script>
+    <!-- Plan B: PowerSync's main module comes from the CDN (same pattern as
+         supabase-js right above) -- sw.js already caches any cross-origin
+         request generically, so this is available offline after the first
+         load. Pinned to an exact version deliberately: an unpinned /+esm
+         could float to a new release and silently change behavior.
+         The SQLite worker CANNOT come from a CDN (browsers refuse to
+         construct a SharedWorker from a cross-origin script) -- it's
+         vendored locally under js/powersync/vendor/, see client.js. -->
+    <script type="importmap">
+    {
+        "imports": {
+            "@powersync/web": "https://cdn.jsdelivr.net/npm/@powersync/web@2.4.1/+esm"
+        }
+    }
+    </script>
     <!-- shared.js first: it owns escapeHtml/showToast, used by every module below -->
     <script src="/js/ui/shared.js?v=__APP_VERSION__"></script>
     <script src="/js/storage.js?v=__APP_VERSION__"></script>
@@ -69,6 +92,11 @@
     <script src="/js/audio.js?v=__APP_VERSION__"></script>
     <script src="/js/share.js?v=__APP_VERSION__"></script>
     <script src="/js/agent.js?v=__APP_VERSION__"></script>
+    <!-- connector.js is a classic script (needs window.SupabaseManager,
+         itself not a module) -- client.js (a real ES module, imports from
+         '@powersync/web') reads it back via window.PowerSyncConnector. -->
+    <script src="/js/powersync/connector.js?v=__APP_VERSION__"></script>
+    <script type="module" src="/js/powersync/client.js?v=__APP_VERSION__"></script>
     <script src="/js/ui.js?v=__APP_VERSION__"></script>
     <script src="/js/app.js?v=__APP_VERSION__"></script>
     <script src="/js/desktop.js?v=__APP_VERSION__"></script>
@@ -250,9 +278,9 @@
                                 <i class="fa-solid fa-door-closed text-lg"></i>
                                 CERRAR JORNADA (CIERRE DE DÍA)
                             </button>
-                            <button id="btn-clean-offline-cache" class="btn-touch" style="margin-top: 0.5rem; background-color: transparent; border: 1.5px solid var(--color-gold); color: var(--color-gold); font-weight: 800; gap: 0.5rem; width: 100%; font-size: 0.8rem;" title="Sincroniza lo pendiente y limpia la memoria local del dispositivo -- usar al abrir o cerrar la jornada">
+                            <button id="btn-clean-offline-cache" class="btn-touch" style="margin-top: 0.5rem; background-color: transparent; border: 1.5px solid var(--color-gold); color: var(--color-gold); font-weight: 800; gap: 0.5rem; width: 100%; font-size: 0.8rem;" title="Revisa ventas en cuarentena y limpia la caché de la app en este dispositivo -- usar al abrir o cerrar la jornada">
                                 <i class="fa-solid fa-broom"></i>
-                                SINCRONIZAR Y LIMPIAR ESTE DISPOSITIVO
+                                LIMPIAR CACHÉ DE ESTE DISPOSITIVO
                             </button>
                         </div>
                     </div>

@@ -44,7 +44,8 @@ const TYPES = {
     '.jpeg': 'image/jpeg',
     '.svg': 'image/svg+xml',
     '.ico': 'image/x-icon',
-    '.webp': 'image/webp'
+    '.webp': 'image/webp',
+    '.wasm': 'application/wasm'
 };
 
 http.createServer((req, res) => {

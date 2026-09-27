@@ -15,8 +15,31 @@ function checkRolePermission(role, action) {
     return (rolePermissions[normalizedRole] || []).includes(action);
 }
 
+// Plan B, Task 11 (spec §6, "Bordes"): an explicit app-level rule, not
+// something Supabase's refresh token itself enforces on a schedule. If this
+// device hasn't proven real connectivity (a fresh sign-in or a genuine
+// token refresh -- js/supabase.js init() records the timestamp only on
+// those events) in over 30 days, quick-PIN reactivation is refused and a
+// full password login is required instead -- that always needs
+// connectivity anyway, so it doubles as the recovery path.
+const OFFLINE_LIMIT_DAYS = 30;
+
+/**
+ * @param {string|null} lastOnlineAtIso ISO timestamp from
+ *   StorageManager.loadLastAuthOnlineAt(), or null if never established.
+ * @returns {boolean} true once more than 30 days have passed since then.
+ */
+function isOfflineLimitExceeded(lastOnlineAtIso) {
+    if (!lastOnlineAtIso) return false; // no baseline yet -- don't lock out a fresh install
+    const lastOnline = new Date(lastOnlineAtIso).getTime();
+    if (isNaN(lastOnline)) return false;
+    return (Date.now() - lastOnline) > OFFLINE_LIMIT_DAYS * 24 * 60 * 60 * 1000;
+}
+
 const AuthManager = {
-    checkRolePermission
+    checkRolePermission,
+    isOfflineLimitExceeded,
+    OFFLINE_LIMIT_DAYS
 };
 
 if (typeof module !== 'undefined' && module.exports) {

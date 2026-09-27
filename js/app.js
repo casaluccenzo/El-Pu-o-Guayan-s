@@ -80,77 +80,17 @@ if (!myDeviceId) {
     localStorage.setItem('casa_lucenzo_device_id', myDeviceId);
 }
 
-// ================= SELF-HEALING SENTINEL & OFFLINE QUEUE ENGINE =================
-const OFFLINE_QUEUE_KEY = 'casa_lucenzo_offline_queue';
-
-function getOfflineQueue() {
-    try {
-        const saved = localStorage.getItem(OFFLINE_QUEUE_KEY);
-        return saved ? JSON.parse(saved) : [];
-    } catch(e) {
-        return [];
-    }
-}
-
-function addToOfflineQueue(actionType, payload) {
-    try {
-        const queue = getOfflineQueue();
-        queue.push({ id: Date.now() + '_' + Math.random().toString(36).substring(2,6), actionType, payload, createdAt: new Date().toISOString() });
-        localStorage.setItem(OFFLINE_QUEUE_KEY, JSON.stringify(queue));
-        if (typeof updateOfflineStatusUI === 'function') updateOfflineStatusUI();
-    } catch(e) {
-        console.error("Self-Healing Queue: Failed to save offline item", e);
-    }
-}
-
-async function processOfflineQueue() {
-    const queue = getOfflineQueue();
-    if (queue.length === 0) {
-        if (typeof updateOfflineStatusUI === 'function') updateOfflineStatusUI();
-        return;
-    }
-    if (!window.SupabaseManager.isConfigured()) return;
-
-    console.log(`Self-Healing: Processing ${queue.length} offline queued items...`);
-    const remaining = [];
-    for (const item of queue) {
-        try {
-            if (item.actionType === 'insertSales' || item.actionType === 'upsertSales') {
-                await window.SupabaseManager.upsertSales(item.payload);
-            } else if (item.actionType === 'deleteSales') {
-                await window.SupabaseManager.deleteSales(item.payload);
-            } else if (item.actionType === 'updateStock') {
-                await window.SupabaseManager.updateProductStock(item.payload.id, item.payload.stock);
-            } else {
-                // Not one of this queue's own shapes -- most likely an item
-                // queued by enqueueOfflineOp() in js/supabase.js, which
-                // shares this exact localStorage key under a different
-                // schema ({table, action, data, ...} vs. this queue's
-                // {actionType, payload, ...}). Keep it instead of silently
-                // dropping it: this loop used to overwrite the whole key
-                // with only what it recognized, wiping out that other
-                // queue's still-pending (and possibly not-yet-synced) items
-                // every time this ran.
-                remaining.push(item);
-            }
-        } catch(e) {
-            console.warn("Self-Healing Queue item retry deferred:", item, e);
-            remaining.push(item);
-        }
-    }
-    localStorage.setItem(OFFLINE_QUEUE_KEY, JSON.stringify(remaining));
-    if (typeof updateOfflineStatusUI === 'function') updateOfflineStatusUI();
-}
+// ================= SELF-HEALING SENTINEL =================
 
 /**
- * Manual "Sincronizar y Limpiar" action for the apertura/cierre routine.
- * Forces a real sync attempt on both offline queues first -- never clears
- * blindly -- and only after that attempt still leaves something stuck does
- * it offer to discard it, showing exactly what and asking to confirm. This
- * is how the "La guaira" account kept resurrecting on 2026-08-14: a device
- * had an old queued write that nothing ever forced to either sync or clear,
- * so it kept replaying itself. Finishes by dropping this device's cached
- * app code so it's always running what's actually deployed.
+ * Manual "Limpiar Caché" action for the apertura/cierre routine. PowerSync
+ * owns write persistence and retry now (Plan B, Task 12 -- there is no
+ * client-side queue left to sync), so this no longer forces a sync attempt.
+ * What's left, still genuinely useful on its own: surface + let an admin
+ * discard sales this device quarantined (found missing from the server with
+ * nothing to explain the gap -- see the reconciliation note in
+ * loadAllDataFromSupabase), then drop this device's cached app code so it's
+ * always running what's actually deployed.
  */
 async function handleCleanOfflineCache() {
     const btn = document.getElementById('btn-clean-offline-cache');
@@ -159,23 +99,9 @@ async function handleCleanOfflineCache() {
 
     try {
         if (!navigator.onLine) {
-            window.UIManager.showToast("📡 Sin conexión: conectate a internet antes de sincronizar.", "fa-solid fa-wifi-slash");
+            window.UIManager.showToast("📡 Sin conexión: conectate a internet para traer la última versión.", "fa-solid fa-wifi-slash");
             return;
         }
-
-        window.UIManager.showToast("⏳ Sincronizando pendientes...", "fa-solid fa-hourglass-half");
-
-        // Sequential, not parallel -- running both at once is the exact race
-        // that let mismatched-format items clobber each other in the first
-        // place (fixed separately, but no reason to still race them here).
-        if (window.SupabaseManager.isConfigured()) {
-            await window.SupabaseManager.syncOfflineQueue();
-        }
-        await processOfflineQueue();
-
-        const stuckQueue = getOfflineQueue();
-        const deadLetterRaw = localStorage.getItem('casa_lucenzo_offline_queue_failed');
-        const deadLetter = deadLetterRaw ? JSON.parse(deadLetterRaw) : [];
 
         // Sales this device set aside because the server no longer had them and
         // nothing explained why. Surfaced here rather than left to rot: it is
@@ -196,33 +122,8 @@ async function handleCleanOfflineCache() {
                 logActivity("Descarte de Ventas en Cuarentena", `Se descartaron ${quarantined.length} venta(s) apartadas por $${total.toFixed(2)} tras revisión manual del administrador.`);
                 window.StorageManager.clearQuarantinedSales();
             }
-        }
-
-        if (stuckQueue.length === 0 && deadLetter.length === 0) {
-            window.UIManager.showToast("✅ Todo sincronizado. No había nada pendiente.", "fa-solid fa-circle-check");
         } else {
-            const totalStuck = stuckQueue.length + deadLetter.length;
-            const summary = [...stuckQueue, ...deadLetter].reduce((acc, item) => {
-                const label = item.table || item.actionType || 'desconocido';
-                acc[label] = (acc[label] || 0) + 1;
-                return acc;
-            }, {});
-            const summaryText = Object.entries(summary).map(([k, v]) => `${v} de "${k}"`).join(', ');
-
-            const confirmMsg = `⚠️ Hay ${totalStuck} operación(es) que NO se pudieron sincronizar incluso después de reintentar ahora mismo (${summaryText}).\n\n` +
-                `Esto casi siempre es una venta o ajuste viejo que quedó atascado en ESTE dispositivo y se reintenta solo. Si ya revisaste que el sistema tiene los datos correctos, es seguro descartarlo.\n\n` +
-                `¿Descartar estas ${totalStuck} operación(es) pendientes de este dispositivo?`;
-
-            if (confirm(confirmMsg)) {
-                localStorage.removeItem(OFFLINE_QUEUE_KEY);
-                localStorage.removeItem('casa_lucenzo_offline_queue_failed');
-                logActivity("Limpieza Manual de Caché Offline", `Se descartaron ${totalStuck} operación(es) pendientes atascadas en este dispositivo (${summaryText}), confirmado a mano desde "Sincronizar y Limpiar este Dispositivo".`);
-                window.UIManager.showToast(`🧹 Se descartaron ${totalStuck} operación(es) atascadas.`, "fa-solid fa-broom");
-            } else {
-                window.UIManager.showToast("Cancelado -- no se borró nada.", "fa-solid fa-circle-info");
-                if (btn) { btn.disabled = false; btn.style.opacity = ''; }
-                return;
-            }
+            window.UIManager.showToast("✅ No había ventas en cuarentena.", "fa-solid fa-circle-check");
         }
 
         // Drop this device's cached app code so it's always running what's
@@ -241,7 +142,7 @@ async function handleCleanOfflineCache() {
         setTimeout(() => window.location.reload(), 1200);
     } catch (e) {
         console.error("Error en limpieza manual de caché offline:", e);
-        window.UIManager.showToast("❌ Error al sincronizar/limpiar. Revisá la consola.", "fa-solid fa-circle-xmark");
+        window.UIManager.showToast("❌ Error al limpiar. Revisá la consola.", "fa-solid fa-circle-xmark");
         if (btn) { btn.disabled = false; btn.style.opacity = ''; }
     }
 }
@@ -262,33 +163,58 @@ function sanitizeDataIntegrity(log) {
     });
 }
 
-function updateOfflineStatusUI() {
+// Plan B, Task 13: #header-offline-badge's driver, replacing the offline
+// queue's item count (retired in Task 12) with PowerSyncManager's real
+// SyncStatus. Bound to db.registerListener's statusChanged event (see
+// js/powersync/client.js) -- not polled -- so it reflects connect/
+// disconnect/upload/download transitions the instant PowerSync reports them.
+async function updateSyncStatusUI(status) {
+    if (!status) return;
+    // No connect() attempted yet (pre-login, or PowerSync not configured at
+    // all) -- connected:false here doesn't mean "offline", it means "never
+    // tried". Stay quiet instead of flashing "Sin Conexión" on the login screen.
+    if (!window.PowerSyncManager || !window.PowerSyncManager.hasAttemptedConnect()) return;
+
+    // Once PowerSync has synced at least once, its own connected/disconnected
+    // signal is more accurate than the Supabase realtime channel's (that
+    // channel can stay SUBSCRIBED for a while after real connectivity drops).
+    if (status.hasSynced && window.UIManager && window.UIManager.updateConnectionStatus) {
+        window.UIManager.updateConnectionStatus(status.connected ? 'online' : 'offline', 'powersync');
+    }
+
     const badge = document.getElementById('header-offline-badge');
     const countSpan = document.getElementById('header-offline-count');
     if (!badge || !countSpan) return;
 
-    const queue = getOfflineQueue();
-    const count = queue.length;
-    const isOnline = navigator.onLine;
-
-    if (!isOnline || count > 0) {
+    if (!status.connected) {
         badge.style.display = 'flex';
-        if (!isOnline) {
-            badge.style.background = 'rgba(239, 68, 68, 0.2)';
-            badge.style.borderColor = 'rgba(239, 68, 68, 0.5)';
-            badge.style.color = '#F87171';
-            countSpan.textContent = count > 0 ? `⚡ Sin Conexión (${count})` : '⚡ Sin Conexión';
-        } else {
-            badge.style.background = 'rgba(245, 158, 11, 0.18)';
-            badge.style.borderColor = 'rgba(245, 158, 11, 0.5)';
-            badge.style.color = '#FBBF24';
-            countSpan.textContent = `⚡ ${count} pend.`;
-        }
-    } else {
-        badge.style.display = 'none';
+        badge.style.background = 'rgba(239, 68, 68, 0.2)';
+        badge.style.borderColor = 'rgba(239, 68, 68, 0.5)';
+        badge.style.color = '#F87171';
+        countSpan.textContent = '⚡ Sin Conexión';
+        badge.title = 'Sin conexión con el servidor -- los cambios se guardan localmente';
+        return;
     }
+
+    if (status.uploading || status.downloading) {
+        let pendingText = '⚡ Sincronizando…';
+        try {
+            const stats = window.PowerSyncManager && await window.PowerSyncManager.getUploadQueueStats();
+            if (stats && stats.count > 0) pendingText = `⚡ ${stats.count} pend.`;
+        } catch (e) { /* best-effort only -- badge still shows "Sincronizando…" */ }
+        badge.style.display = 'flex';
+        badge.style.background = 'rgba(245, 158, 11, 0.18)';
+        badge.style.borderColor = 'rgba(245, 158, 11, 0.5)';
+        badge.style.color = '#FBBF24';
+        countSpan.textContent = pendingText;
+        badge.title = 'Sincronizando cambios pendientes con el servidor';
+        return;
+    }
+
+    // Connected, nothing uploading/downloading -- fully caught up.
+    badge.style.display = 'none';
 }
-window.updateOfflineStatusUI = updateOfflineStatusUI;
+window.updateSyncStatusUI = updateSyncStatusUI;
 
 function initSelfHealingSentinel() {
     // Intercept unhandled errors & promise rejections to prevent crashing UI
@@ -301,28 +227,6 @@ function initSelfHealingSentinel() {
         console.warn('Self-Healing Sentinel caught promise rejection:', event.reason);
         if (event && event.preventDefault) event.preventDefault();
     });
-
-    // Online/offline status listeners
-    window.addEventListener('online', () => {
-        console.log("Network online detected. Triggering Self-Healing Queue sync...");
-        updateOfflineStatusUI();
-        processOfflineQueue();
-    });
-
-    window.addEventListener('offline', () => {
-        console.log("Network offline detected.");
-        updateOfflineStatusUI();
-    });
-
-    // Periodic background check every 20 seconds
-    setInterval(() => {
-        updateOfflineStatusUI();
-        if (navigator.onLine) {
-            processOfflineQueue();
-        }
-    }, 20000);
-
-    setTimeout(updateOfflineStatusUI, 1000);
 }
 
 // Call Self-Healing Sentinel initialization immediately
@@ -423,6 +327,27 @@ function applyStockCount(product, targetStock) {
 }
 
 /**
+ * Plan B, Task 6: single choke point for persisting a stock change.
+ * Records the movement in stock_movements (append-only, spec §5.1a) instead
+ * of writing products.stock/max/initial_stock directly -- Postgres'
+ * recompute_product_stock() (migracion 033) derives those from the sum of
+ * these movements. Silently skips a zero delta: nothing physically moved
+ * (e.g. a recount clamped to the same value), so there's nothing to log.
+ * @param {Object} product Product the movement applies to
+ * @param {number} delta Signed change actually applied to product.stock
+ * @param {'load'|'sale'|'sale_return'|'count_down'} type Movement kind (spec §5.1a)
+ * @param {string} [sourceUuid] Traceability link (e.g. the replenishment uuid for a 'load')
+ */
+function recordStockMovement(product, delta, type, sourceUuid) {
+    if (!delta) return;
+    if (window.SupabaseManager.isConfigured()) {
+        window.SupabaseManager.insertStockMovement({
+            productId: product.id, delta, type, sourceUuid: sourceUuid || null, deviceId: myDeviceId
+        });
+    }
+}
+
+/**
  * Handle stock adjustments, records transactions, triggers vibrations and floating numbers
  * @param {string} id Product identifier
  * @param {number} amount Change amount (+1 or -1)
@@ -465,9 +390,7 @@ function adjustStock(id, amount, event) {
         product.stock = Math.max(0, product.stock - 1);
         window.StorageManager.saveProducts(products);
 
-        if (window.SupabaseManager.isConfigured()) {
-            window.SupabaseManager.updateProductStock(product.id, product.stock);
-        }
+        recordStockMovement(product, product.stock - originalStock, 'sale');
 
         // Audio warning if stock falls under threshold
         if (product.stock <= product.min && originalStock > product.min) {
@@ -492,12 +415,11 @@ function adjustStock(id, amount, event) {
 
         triggerHaptic(15);
 
+        const beforeLoad = product.stock;
         applyStockLoad(product, 1);
         window.StorageManager.saveProducts(products);
 
-        if (window.SupabaseManager.isConfigured()) {
-            window.SupabaseManager.updateProductStock(product.id, product.stock, product.max, product.initial_stock);
-        }
+        recordStockMovement(product, product.stock - beforeLoad, 'load');
 
         window.UIManager.renderLocal(products, adjustStock, activeCategory, searchQuery);
     }
@@ -537,9 +459,7 @@ function handleCartQtyChange(id, newQty) {
     product.stock = Math.max(0, product.stock - diff);
     window.StorageManager.saveProducts(products);
 
-    if (window.SupabaseManager.isConfigured()) {
-        window.SupabaseManager.updateProductStock(product.id, product.stock);
-    }
+    recordStockMovement(product, product.stock - originalStock, diff > 0 ? 'sale' : 'sale_return');
 
     // Update cart items array
     if (newQty === 0) {
@@ -601,16 +521,11 @@ function handleAddToCart(productId) {
     }
     localStorage.setItem('casa_lucenzo_current_cart', JSON.stringify(currentCart));
 
+    const beforeAdd = product.stock;
     product.stock = Math.max(0, product.stock - 1);
     window.StorageManager.saveProducts(products);
 
-    if (window.SupabaseManager.isConfigured()) {
-        try {
-            window.SupabaseManager.updateProductStock(product.id, product.stock);
-        } catch(e) {
-            addToOfflineQueue('updateStock', { id: product.id, stock: product.stock });
-        }
-    }
+    recordStockMovement(product, product.stock - beforeAdd, 'sale');
 
     window.UIManager.renderActiveCart(currentCart, handleAddToCart, handleRemoveFromCart, handleClearCart, handleCheckoutCart);
     window.UIManager.renderLocal(products, adjustStock, activeCategory, searchQuery);
@@ -629,15 +544,10 @@ function handleRemoveFromCart(productId) {
     const product = products.find(p => p.id === productId);
 
     if (product) {
+        const beforeRemove = product.stock;
         product.stock = product.stock >= product.max ? product.stock + 1 : Math.min(product.max, product.stock + 1);
         window.StorageManager.saveProducts(products);
-        if (window.SupabaseManager.isConfigured()) {
-            try {
-                window.SupabaseManager.updateProductStock(product.id, product.stock);
-            } catch(e) {
-                addToOfflineQueue('updateStock', { id: product.id, stock: product.stock });
-            }
-        }
+        recordStockMovement(product, product.stock - beforeRemove, 'sale_return');
     }
 
     cartItem.quantity--;
@@ -661,10 +571,9 @@ async function handleClearCart() {
         currentCart.forEach(cartItem => {
             const product = products.find(p => p.id === cartItem.productId);
             if (product) {
+                const beforeClear = product.stock;
                 product.stock = product.stock >= product.max ? product.stock + cartItem.quantity : Math.min(product.max, product.stock + cartItem.quantity);
-                if (window.SupabaseManager.isConfigured()) {
-                    window.SupabaseManager.updateProductStock(product.id, product.stock);
-                }
+                recordStockMovement(product, product.stock - beforeClear, 'sale_return');
             }
         });
 
@@ -676,8 +585,8 @@ async function handleClearCart() {
         const editingTimestampForClear = sessionStorage.getItem('casa_lucenzo_editing_timestamp');
         if (editingSalesStr && editingTimestampForClear) {
             if (window.SupabaseManager.isConfigured()) {
-                const deleted = await window.SupabaseManager.deleteSalesByTimestamp(editingTimestampForClear);
-                if (!deleted) {
+                const voided = await window.SupabaseManager.voidSalesByTimestamp(editingTimestampForClear, "Cuenta vaciada durante edición");
+                if (!voided) {
                     window.UIManager.showToast("⚠️ No se pudo confirmar el vaciado por falta de conexión. La cuenta podría reaparecer -- revisala en Cuentas Activas.", "fa-solid fa-triangle-exclamation");
                 }
             }
@@ -735,16 +644,16 @@ async function handleCheckoutCart() {
     const timestamp = editingTimestamp || new Date().toISOString();
 
     if (editingSalesStr && editingTimestamp) {
-        // Delete by timestamp (the account's real identity key), not by a
+        // Void by timestamp (the account's real identity key), not by a
         // uuid list captured back when "Modificar" was pressed -- that list
         // can go stale, which used to leave the old rows behind forever
         // while the corrected set was inserted right on top of them,
-        // silently doubling that account's sales. If the delete can't be
+        // silently doubling that account's sales. If the void can't be
         // confirmed right now, stop here instead of inserting a replacement
-        // on top of rows that might still be there.
+        // on top of rows that might still be active.
         if (window.SupabaseManager.isConfigured()) {
-            const deleted = await window.SupabaseManager.deleteSalesByTimestamp(editingTimestamp);
-            if (!deleted) {
+            const voided = await window.SupabaseManager.voidSalesByTimestamp(editingTimestamp, "Corrección de cuenta");
+            if (!voided) {
                 window.UIManager.showToast("⚠️ No se pudo confirmar la corrección por falta de conexión. Probá de nuevo en unos segundos -- no se guardó nada todavía.", "fa-solid fa-triangle-exclamation");
                 return;
             }
@@ -778,14 +687,10 @@ async function handleCheckoutCart() {
     window.StorageManager.saveSalesLog(salesLog);
     logActivity("Registro Venta", `Venta de ${newSales.length} ítems por $${newSales.reduce((s,x)=>s+x.price, 0).toFixed(2)}. Cliente: ${clientName || 'Sin Nombre'}`);
 
-    // Sync to Supabase with Self-Healing Queue fallback
+    // insertSales writes local-first (PowerSync) when synced, Supabase-direct
+    // otherwise -- it handles its own fallback/errors internally now.
     if (window.SupabaseManager.isConfigured()) {
-        try {
-            await window.SupabaseManager.insertSales(newSales);
-        } catch (e) {
-            console.warn("Error syncing cart checkout sales to Supabase, queuing for offline auto-healing", e);
-            addToOfflineQueue('insertSales', newSales);
-        }
+        await window.SupabaseManager.insertSales(newSales);
     }
 
     currentCart = [];
@@ -827,24 +732,26 @@ function handleUndoSale(timestamp) {
     triggerHaptic(15);
 
     if (confirm(`¿Estás seguro de deshacer esta cuenta completa y devolver los productos al stock?`)) {
-        // Immediately record deleted UUIDs locally so sync never resurrects them
-        const uuidsToDelete = matchingSales.map(s => s.uuid).filter(Boolean);
-        if (uuidsToDelete.length > 0) {
-            window.StorageManager.addDeletedSalesUuids(uuidsToDelete);
+        // Immediately record voided UUIDs locally so a stale Supabase-direct
+        // refetch (pre-first-sync only -- PowerSync's own local view updates
+        // instantly) can't resurrect them into salesLog before the void
+        // upload lands.
+        const uuidsToVoid = matchingSales.map(s => s.uuid).filter(Boolean);
+        if (uuidsToVoid.length > 0) {
+            window.StorageManager.addDeletedSalesUuids(uuidsToVoid);
         }
 
         matchingSales.forEach(sale => {
             const product = products.find(p => p.id === sale.productId);
             if (product) {
+                const beforeUndo = product.stock;
                 product.stock = product.stock >= product.max ? product.stock + 1 : Math.min(product.max, product.stock + 1);
-                if (window.SupabaseManager.isConfigured()) {
-                    window.SupabaseManager.updateProductStock(product.id, product.stock);
-                }
+                recordStockMovement(product, product.stock - beforeUndo, 'sale_return', sale.uuid);
             }
         });
 
-        if (window.SupabaseManager.isConfigured() && uuidsToDelete.length > 0) {
-            window.SupabaseManager.deleteSales(uuidsToDelete);
+        if (window.SupabaseManager.isConfigured() && uuidsToVoid.length > 0) {
+            uuidsToVoid.forEach(uuid => window.SupabaseManager.voidSale(uuid, "Cuenta deshecha por el usuario"));
         }
 
         // Filter out these sales from memory
@@ -1060,12 +967,7 @@ async function markTransactionAsPaid(timestamp, paymentMethod, updatedName = nul
     });
 
     if (window.SupabaseManager.isConfigured()) {
-        try {
-            await window.SupabaseManager.upsertSales(updatedSales);
-        } catch (e) {
-            console.warn("Error updating sale status to paid in Supabase, queuing for offline auto-healing", e);
-            addToOfflineQueue('upsertSales', updatedSales);
-        }
+        await window.SupabaseManager.upsertSales(updatedSales);
     }
 
     // Update local salesLog
@@ -1092,9 +994,10 @@ async function markTransactionAsPaid(timestamp, paymentMethod, updatedName = nul
 function clearAllSales() {
     triggerHaptic(20);
     if (confirm("¿Estás seguro de que quieres borrar el historial de ventas y reiniciar la caja a $0.00?")) {
-        // Sync deletes to Supabase
+        // Void instead of delete (spec §5.2) -- doesn't touch product stock,
+        // same as the delete this replaces never did either.
         if (window.SupabaseManager.isConfigured()) {
-            salesLog.forEach(s => window.SupabaseManager.deleteSale(s.uuid));
+            salesLog.forEach(s => window.SupabaseManager.voidSale(s.uuid, "Reinicio de caja"));
         }
 
         salesLog = [];
@@ -1232,16 +1135,12 @@ async function updateProductStockDirect(id, newStock) {
     if (!product) return;
 
     triggerHaptic(15);
+    const beforeCount = product.stock;
     applyStockCount(product, newStock);
     window.StorageManager.saveProducts(products);
 
-    if (window.SupabaseManager.isConfigured()) {
-        try {
-            await window.SupabaseManager.updateProductStock(product.id, product.stock, product.max, product.initial_stock);
-        } catch (e) {
-            console.error("Failed to update product stock and max in Supabase", e);
-        }
-    }
+    const countDelta = product.stock - beforeCount;
+    recordStockMovement(product, countDelta, countDelta > 0 ? 'load' : 'count_down');
 
     renderAllViews();
     window.UIManager.showToast(`✅ Vitrina actualizada: "${product.name}" ahora tiene ${product.stock} ${product.unit || 'unid.'}.`, "fa-solid fa-circle-check");
@@ -1258,17 +1157,12 @@ async function addProductStockDirect(id, amountToAdd) {
     if (amountToAdd <= 0) return;
 
     triggerHaptic(15);
+    const beforeAdd = product.stock;
     applyStockLoad(product, amountToAdd);
 
     window.StorageManager.saveProducts(products);
 
-    if (window.SupabaseManager.isConfigured()) {
-        try {
-            await window.SupabaseManager.updateProductStock(product.id, product.stock, product.max, product.initial_stock);
-        } catch (e) {
-            console.error("Failed to add product stock and max in Supabase", e);
-        }
-    }
+    recordStockMovement(product, product.stock - beforeAdd, 'load');
 
     renderAllViews();
     window.UIManager.showToast(`✅ Vitrina actualizada: Se sumaron ${amountToAdd} piezas a "${product.name}". Total: ${product.stock}.`, "fa-solid fa-circle-check");
@@ -1307,10 +1201,9 @@ async function confirmReceipt() {
     try {
         pending.forEach(dispatch => {
             const product = products.find(p => p.id === dispatch.productId);
+            const beforeReceipt = product ? product.stock : 0;
             if (product && applyStockLoad(product, dispatch.amount)) {
-                if (window.SupabaseManager.isConfigured()) {
-                    window.SupabaseManager.updateProductStock(product.id, product.stock, product.max, product.initial_stock);
-                }
+                recordStockMovement(product, product.stock - beforeReceipt, 'load', dispatch.uuid);
                 logActivity("Recepción Vitrina", `Recibidos ${dispatch.amount} ${product.unit || 'unid.'} de ${product.name} en vitrina. Stock actual: ${product.stock}/${product.max}`);
             }
             dispatch.status = 'recibido';
@@ -1340,12 +1233,11 @@ function resetToMax() {
     triggerHaptic(15);
     products.forEach(p => {
         const cat = p.category || (window.StorageManager ? window.StorageManager.getProductCategory(p) : 'pastelitos');
+        const beforeReset = p.stock || 0;
         // Topping the shelf back up to capacity is a load like any other: only
         // the missing pieces enter, and the day's baseline grows by that much.
         if (cat === 'pastelitos' && applyStockLoad(p, (p.max || 0) - (p.stock || 0))) {
-            if (window.SupabaseManager.isConfigured()) {
-                window.SupabaseManager.updateProductStock(p.id, p.stock, p.max, p.initial_stock);
-            }
+            recordStockMovement(p, p.stock - beforeReset, 'load');
         }
     });
     window.StorageManager.saveProducts(products);
@@ -1435,6 +1327,22 @@ let pnlMode = 'week';       // 'week' | 'month'
 let pnlAnchor = new Date(); // any date inside the selected period
 let pnlLast = null;         // last rendered pnl (for the PDF button)
 
+// Plan B, Task 14 (spec §4): the historical/reporting reads below
+// (fetchStatsData, fetchExpensesRange, fetchPnlData, fetchDayReport,
+// fetchReportDays, fetchSalesHistory, fetchActiveSessions) go straight to
+// Postgres on purpose -- they're not part of PowerSync's sync stream, so
+// there's no local fallback for them, ever. Before this task they either
+// silently returned []/null (a real network failure looks identical to "no
+// data exists" -- e.g. fetchReportDays offline used to render "No se
+// encontraron reportes recientes", which reads as "nothing happened" when
+// really it's "couldn't ask the server") or, in a couple of spots, just did
+// nothing at all. This makes the "no conexión" case explicit instead.
+function requireOnline(featureName) {
+    if (window.SupabaseManager.isConfigured() && navigator.onLine) return true;
+    window.UIManager.showToast(`⚠️ ${featureName} requiere conexión a internet`, "fa-solid fa-wifi-slash");
+    return false;
+}
+
 async function loadAndRenderExpensesTab(forceRefetch = false) {
     if (currentRole !== 'admin') return;
     const monthInput = document.getElementById('admin-expense-filter-month');
@@ -1444,11 +1352,15 @@ async function loadAndRenderExpensesTab(forceRefetch = false) {
 
     if (forceRefetch) delete expensesTabCache[month];
     if (!Array.isArray(expensesTabCache[month])) {
-        if (window.SupabaseManager.isConfigured() && navigator.onLine) {
+        if (requireOnline('Ver gastos de otros meses')) {
             const start = new Date(month + '-01T00:00:00');
             const end = new Date(start); end.setMonth(end.getMonth() + 1);
             expensesTabCache[month] = await window.SupabaseManager.fetchExpensesRange(start.toISOString(), end.toISOString());
         } else {
+            // Best-effort degraded view: whatever's in the local operational
+            // window (Task 5's local-first expenses) -- complete for the
+            // current month, but silently partial for any other month. The
+            // toast above is what keeps that from reading as "gastos: $0".
             expensesTabCache[month] = expenses.filter(e => (e.timestamp || '').slice(0, 7) === month);
         }
     }
@@ -1582,7 +1494,9 @@ async function loadPnl(forceRefetch = false) {
             }
             sales = data.sales; expenses = data.expenses;
         } else if (container) {
-            container.innerHTML = `<div style="font-size:0.85rem; color:var(--color-danger); text-align:center; padding:1.5rem 0;">Sin conexión — el resumen necesita datos del servidor.</div>`;
+            container.innerHTML = `<div style="font-size:0.85rem; color:var(--color-danger); text-align:center; padding:1.5rem 0;">Sin conexión — el resumen necesita datos del servidor.<br><button id="btn-pnl-retry-offline" class="btn-action-small" style="margin-top:0.75rem;"><i class="fa-solid fa-rotate"></i> Reintentar</button></div>`;
+            const retryBtn = document.getElementById('btn-pnl-retry-offline');
+            if (retryBtn) retryBtn.addEventListener('click', () => loadPnl(true));
             return;
         }
         pnlCache[key] = window.AnalyticsManager.aggregatePnl(sales, expenses, products, {
@@ -1618,6 +1532,13 @@ function addDebt(e) {
     let targetDebtObj;
 
     if (existingClient) {
+        // Plan B, Task 8: existingClient.amount is now a COMPUTED balance
+        // (original - abonos, see mapDebtRow), not the stored value -- must
+        // add the new debt onto originalAmount, or upsertDebt would persist
+        // an already-paid-down number as if it were the fresh original.
+        const currentOriginal = (existingClient.originalAmount !== undefined && existingClient.originalAmount !== null)
+            ? existingClient.originalAmount : existingClient.amount;
+        existingClient.originalAmount = currentOriginal + amount;
         existingClient.amount += amount;
         existingClient.timestamp = new Date().toISOString();
         if (description) {
@@ -1671,9 +1592,15 @@ function settleDebtPayment(uuid) {
 
     triggerHaptic(15);
 
+    // Plan B, Task 8: abonos son append-only (spec §5.3) -- ya no se persiste
+    // una resta de debts.amount (ver insertDebtPayment más abajo), así que
+    // dejar de mutar client.timestamp/description también: nada los sube a
+    // Postgres desde acá, y mutarlos solo local crearía una vista distinta a
+    // la de cualquier otro dispositivo (o esta misma pestaña tras un
+    // refetch). El monto sí se mantiene optimista en memoria para feedback
+    // instantáneo -- fetchDebts vuelve a calcular el mismo valor apenas
+    // insertDebtPayment sube.
     client.amount = Math.max(0, client.amount - paymentAmount);
-    client.timestamp = new Date().toISOString();
-    client.description = `Abono de $${paymentAmount.toFixed(2)}`;
 
     const saleItem = {
         uuid: crypto.randomUUID ? crypto.randomUUID() : Math.random().toString(36).substring(2) + Date.now().toString(36),
@@ -1690,7 +1617,7 @@ function settleDebtPayment(uuid) {
     logActivity("Abono de Deuda", `Cliente ${client.clientName} abonó $${paymentAmount.toFixed(2)}. Restante: $${client.amount.toFixed(2)}`);
 
     if (window.SupabaseManager.isConfigured()) {
-        window.SupabaseManager.upsertDebt(client);
+        window.SupabaseManager.insertDebtPayment(client.uuid, paymentAmount, null, myDeviceId);
         window.SupabaseManager.insertSale(saleItem);
     }
 
@@ -1928,6 +1855,23 @@ async function openReportHistoryModal() {
         return;
     }
 
+    // Plan B, Task 14: fetchReportDays goes straight to Postgres (not part of
+    // PowerSync's sync stream) -- offline it silently returned [], and the
+    // empty-state below read as "No se encontraron reportes recientes",
+    // indistinguishable from a genuinely quiet 30 days. Distinguish them.
+    if (!navigator.onLine) {
+        body.innerHTML = `
+            <div style="text-align: center; padding: 2rem 0; color: var(--color-text-muted); font-size: 0.8125rem;">
+                <i class="fa-solid fa-wifi-slash" style="font-size: 1.5rem; margin-bottom: 0.5rem; display: block; color: var(--color-danger);"></i>
+                Sin conexión — el historial de reportes necesita datos del servidor.
+                <br><button id="btn-report-history-retry-offline" class="btn-action-small" style="margin-top:0.75rem;"><i class="fa-solid fa-rotate"></i> Reintentar</button>
+            </div>
+        `;
+        const retryBtn = document.getElementById('btn-report-history-retry-offline');
+        if (retryBtn) retryBtn.addEventListener('click', () => openReportHistoryModal());
+        return;
+    }
+
     const days = await window.SupabaseManager.fetchReportDays(30);
 
     if (!days || days.length === 0) {
@@ -1988,6 +1932,7 @@ async function openReportHistoryModal() {
             const dateStr = e.currentTarget.dataset.date;
             const formattedDate = formatReportDateStr(dateStr);
             triggerHaptic(15);
+            if (!requireOnline('Ver el reporte de un día anterior')) return;
             btn.innerHTML = '<i class="fa-solid fa-spinner fa-spin"></i>';
             const report = await window.SupabaseManager.fetchDayReport(dateStr);
             if (report) {
@@ -2009,6 +1954,7 @@ async function openReportHistoryModal() {
             const dateStr = e.currentTarget.dataset.date;
             const formattedDate = formatReportDateStr(dateStr);
             triggerHaptic(15);
+            if (!requireOnline('Enviar el reporte por WhatsApp')) return;
             btn.innerHTML = '<i class="fa-solid fa-spinner fa-spin"></i>';
             // Same Safari/iPadOS quirk as the day-close confirm button: open the
             // tab before the await below so it stays authorized by the click.
@@ -2060,8 +2006,8 @@ async function closeDayAndResetLogs() {
                 console.log("Saving last day close timestamp to Supabase app_config...");
                 await window.SupabaseManager.upsertAppConfig({ lastCloseTime: nowStr });
             } else {
-                console.log("Database does not support last_close_time. Clearing daily sales and expenses from Supabase as fallback...");
-                await window.SupabaseManager.deleteSales(salesLog.map(s => s.uuid));
+                console.log("Database does not support last_close_time. Voiding daily sales and clearing expenses from Supabase as fallback...");
+                await Promise.all(salesLog.map(s => window.SupabaseManager.voidSale(s.uuid, "Cierre de jornada (sin soporte de last_close_time)")));
                 await window.SupabaseManager.deleteExpenses(expenses.map(e => e.uuid));
             }
         }
@@ -2094,6 +2040,27 @@ async function closeDayAndResetLogs() {
         window.StorageManager.clearConsumedReplenishmentUuids();
 
         // 4. Reset showcase products' stock: Pastelitos reset to 0, Packaged items (bebidas, dulces) keep their actual remaining stock
+        //
+        // Plan B, Task 9: stock/initial_stock no persisten nada acá.
+        // insertDayClose() (Step 1b) es lo que mueve la frontera real --
+        // trg_day_close_recompute (migración 030) recalcula esas dos columnas
+        // solo, straight from stock_movements, la misma fórmula que este loop
+        // replicaba a mano con un updateProductStock() directo. Repetirlo acá
+        // competiría con el trigger por las mismas columnas (el mismo
+        // conflicto de doble escritura de Task 6) -- pero sacar la mutación
+        // en memoria por completo tampoco es seguro: el trigger recién corre
+        // cuando el INSERT de insertDayClose efectivamente sube, y esta app
+        // tiene que poder operar offline un día entero (spec R1). Esta
+        // asignación pura en memoria es lo que hace que Cocina vea la vitrina
+        // en cero de inmediato, incluso antes de que el cierre sincronice.
+        // (fetchProducts, más abajo en supabase.js, calcula lo mismo en vivo
+        // para que sobreviva un F5/recarga offline -- hallazgo real de
+        // Gemini, ver Task 9 en el plan.)
+        //
+        // `max` sí necesita seguir escribiéndose directo: a diferencia de
+        // stock/initial_stock, el trigger solo puede CRECER ese techo
+        // (GREATEST), nunca bajarlo -- sin este write explícito, "resetea con
+        // el día" queda roto en TODOS los casos, no solo offline.
         products.forEach(p => {
             const cat = p.category || (window.StorageManager ? window.StorageManager.getProductCategory(p) : 'pastelitos');
             if (cat === 'pastelitos') {
@@ -2104,14 +2071,11 @@ async function closeDayAndResetLogs() {
                 // batches nobody had loaded.
                 p.max = 0;
                 if (window.SupabaseManager.isConfigured()) {
-                    window.SupabaseManager.updateProductStock(p.id, 0, 0, 0);
+                    window.SupabaseManager.resetPastelitoCapacity(p.id);
                 }
             } else {
                 // Keep actual remaining stock for drinks/sweets
                 p.initial_stock = p.stock || 0;
-                if (window.SupabaseManager.isConfigured()) {
-                    window.SupabaseManager.updateProductStock(p.id, p.stock, p.max, p.initial_stock);
-                }
             }
         });
         // 4.5. Ensure BCV automatic exchange connector is active and refreshed
@@ -2307,7 +2271,7 @@ function restoreDefaultProducts() {
         
         if (window.SupabaseManager.isConfigured()) {
             products.forEach(p => window.SupabaseManager.deleteProduct(p.id));
-            salesLog.forEach(s => window.SupabaseManager.deleteSale(s.uuid));
+            salesLog.forEach(s => window.SupabaseManager.voidSale(s.uuid, "Restauración de productos por defecto"));
             expenses.forEach(e => window.SupabaseManager.deleteExpense(e.uuid));
             debts.forEach(d => window.SupabaseManager.deleteDebt(d.uuid));
             replenishments.forEach(r => window.SupabaseManager.deleteReplenishment(r.uuid));
@@ -2426,10 +2390,33 @@ async function loadAllDataFromSupabase() {
 
     // Save and load products (auto-merge missing default products like dulces)
     if (supProducts && supProducts.length > 0) {
-        products = supProducts.map(p => ({
-            ...p,
-            category: window.StorageManager ? window.StorageManager.getProductCategory(p) : (p.category || 'pastelitos')
-        }));
+        // Plan B, Task 6: a product with a stock_movement still queued locally
+        // (not uploaded yet) hasn't had recompute_product_stock() run for it in
+        // Postgres -- a refetch right now would read its old stock/max/
+        // initial_stock and stomp the optimistic value already on screen with a
+        // stale one (visible as the counter "jumping back"). This is a full
+        // wholesale reassignment of `products`, not a per-field merge, so the
+        // in-memory optimistic value has to be preserved explicitly here for
+        // just those products, not just left alone.
+        const previousProductsById = new Map(products.map(p => [p.id, p]));
+        const pendingStockProductIds = window.SupabaseManager.getPendingStockMovementProductIds
+            ? await window.SupabaseManager.getPendingStockMovementProductIds()
+            : new Set();
+        products = supProducts.map(p => {
+            const merged = {
+                ...p,
+                category: window.StorageManager ? window.StorageManager.getProductCategory(p) : (p.category || 'pastelitos')
+            };
+            if (pendingStockProductIds.has(p.id)) {
+                const prev = previousProductsById.get(p.id);
+                if (prev) {
+                    merged.stock = prev.stock;
+                    merged.initial_stock = prev.initial_stock;
+                    merged.max = prev.max;
+                }
+            }
+            return merged;
+        });
     } else {
         products = window.StorageManager.loadProducts();
     }
@@ -2449,7 +2436,7 @@ async function loadAllDataFromSupabase() {
         console.log(`Auto-added ${missingDefaultProds.length} missing default products to stock.`);
         if (window.SupabaseManager.isConfigured()) {
             missingDefaultProds.forEach(p => {
-                window.SupabaseManager.updateProductStock(p.id, p.stock, p.max, p.initial_stock);
+                window.SupabaseManager.upsertProduct(p);
             });
         }
     }
@@ -2486,52 +2473,27 @@ async function loadAllDataFromSupabase() {
         // resurrect a corrected/deleted account on its own every ~45s, on
         // any device that still had the old data cached, no matter how many
         // times it got cleaned up on the server (2026-08-14, "La guaira").
-        // Only restore what this device can actually corroborate as still
-        // genuinely pending -- i.e. it's still sitting in its offline retry
-        // queue -- instead of trusting the full local mirror forever.
         //
-        // Both offline queues share one localStorage key under two different
-        // item shapes ({actionType, payload} from app.js, {table, action,
-        // data} from supabase.js), so one read covers both; the dead-letter
-        // store is separate and has to be read on its own.
-        const pendingUuids = new Set();
-        const collectUuids = (raw) => {
-            (JSON.parse(raw || '[]')).forEach(op => {
-                if (!op) return;
-                if (Array.isArray(op.payload)) op.payload.forEach(p => p && p.uuid && pendingUuids.add(p.uuid));
-                else if (op.payload && op.payload.uuid) pendingUuids.add(op.payload.uuid);
-                if (op.data && op.data.uuid) pendingUuids.add(op.data.uuid);
-            });
-        };
-        try {
-            collectUuids(localStorage.getItem(OFFLINE_QUEUE_KEY));
-            // Dead-lettered writes gave up retrying after 48h, but "gave up
-            // retrying" is not "was deleted on purpose" -- without this the
-            // sale below is treated as a server-side removal and thrown away
-            // even though it never reached the server at all.
-            collectUuids(localStorage.getItem('casa_lucenzo_offline_queue_failed'));
-        } catch (e) { /* malformed queue -- treat as no corroboration */ }
+        // Plan B, Task 12: this used to "corroborate" a gap against the old
+        // offline queue's pending UUIDs before deciding whether to
+        // auto-restore it -- that queue is gone now (insertSale/insertSales
+        // write local-first straight into PowerSync's `sales` view, so
+        // fetchSales() already includes anything this device wrote but
+        // hasn't uploaded yet; supSales and localSales should only actually
+        // diverge here in the narrow pre-first-sync window). Without a queue
+        // left to corroborate against, treat every gap the same, safe way:
+        // never silently re-insert, always quarantine for a human to review
+        // ("Limpiar Caché" surfaces it). Losing a rare, real pending sale to
+        // manual review is a far smaller failure than the old bug this
+        // guarded against.
+        salesLog = [...cleanSupSales];
 
-        const corroboratedMissing = missingLocal.filter(s => pendingUuids.has(s.uuid));
-        const uncorroboratedMissing = missingLocal.filter(s => !pendingUuids.has(s.uuid));
-
-        salesLog = [...cleanSupSales, ...corroboratedMissing];
-
-        if (corroboratedMissing.length > 0) {
-            console.log(`Restored ${corroboratedMissing.length} un-synced local sales to Supabase (corroborated by an offline retry queue).`);
-            window.SupabaseManager.insertSales(corroboratedMissing);
-        }
-        if (uncorroboratedMissing.length > 0) {
-            // Nothing explains the gap: most likely a deliberate server-side
-            // correction, but possibly a write this device lost track of.
-            // Pull it out of the active log so it stops being re-inserted on
-            // every sync, but quarantine rather than delete -- silently
-            // destroying what might be a real sale is the worse failure.
+        if (missingLocal.length > 0) {
             window.StorageManager.addQuarantinedSales(
-                uncorroboratedMissing,
-                'Faltaba en el servidor y no había ningún reintento pendiente que lo explicara'
+                missingLocal,
+                'Faltaba en el servidor tras la sincronización'
             );
-            console.warn(`${uncorroboratedMissing.length} local sale(s) missing from the server with no pending retry -- moved to quarantine, not restored.`, uncorroboratedMissing.map(s => s.uuid));
+            console.warn(`${missingLocal.length} local sale(s) missing from the server -- moved to quarantine for manual review.`, missingLocal.map(s => s.uuid));
         }
         window.StorageManager.saveSalesLog(salesLog);
     } else if (localSales.length > 0) {
@@ -2696,7 +2658,12 @@ async function loadAndRenderAnalytics(forceRefetch = false) {
                 analyticsSalesCache[analyticsRangeDays] = [];
             }
         } else {
-            // Offline / not configured: fall back to whatever is already in memory
+            // Offline / not configured: fall back to whatever is already in
+            // memory (the current operational window, not the requested
+            // range) -- the toast is what keeps a shorter/emptier-than-
+            // expected chart from reading as "poco se vendió" instead of
+            // "no se pudo traer el historial completo".
+            requireOnline('El historial completo de Análisis');
             analyticsSalesCache[analyticsRangeDays] = salesLog;
         }
     }
@@ -2901,8 +2868,14 @@ async function handleRealtimeDbUpdate(tableName, payload) {
         startOfDay.setHours(0,0,0,0);
         const filterTime = lastCloseTime ? window.parseUTCTimestamp(lastCloseTime) : startOfDay;
 
-        if (eventType === 'DELETE') {
-            salesLog = salesLog.filter(s => s.uuid !== oldRow.uuid);
+        if (eventType === 'DELETE' || (newRow && newRow.voided_at)) {
+            // Plan B, Task 7: a voided sale (spec §5.2) must vanish from the
+            // register/reports exactly like the DELETE this used to only
+            // handle -- without this check the row stayed patched into
+            // salesLog with voided_at set but nothing here ever looks at
+            // that field, so it would keep counting toward totals forever.
+            const uuidToRemove = eventType === 'DELETE' ? oldRow.uuid : newRow.uuid;
+            salesLog = salesLog.filter(s => s.uuid !== uuidToRemove);
         } else {
             const saleDate = window.parseUTCTimestamp(newRow.timestamp);
             if (saleDate >= filterTime) {
@@ -3334,15 +3307,21 @@ function resetInactivityTimer() {
 });
 
 /**
- * Updates the UI lockout banner during penalty block
+ * Updates the UI lockout banner during penalty block.
+ * @param {string} [userId] Plan B, Task 10: when given, reads the per-user
+ *   persisted PIN lockout (js/storage.js) instead of the global
+ *   lockoutUntil handleUserLogin() uses -- a full password login is
+ *   inherently online-only, so that one keeps its own separate counter,
+ *   untouched by this task.
  */
-function updateLockoutUI() {
+function updateLockoutUI(userId) {
     const banner = document.getElementById('pin-lockout-banner');
     if (!banner) return;
 
     const now = Date.now();
-    if (now < lockoutUntil) {
-        const remainingSec = Math.ceil((lockoutUntil - now) / 1000);
+    const until = userId ? (window.StorageManager.loadPinLockoutState(userId).lockedUntil || 0) : lockoutUntil;
+    if (now < until) {
+        const remainingSec = Math.ceil((until - now) / 1000);
         banner.innerHTML = `<i class="fa-solid fa-triangle-exclamation"></i> Acceso bloqueado por ${remainingSec}s por múltiples intentos fallidos.`;
         banner.classList.remove('hidden');
     } else {
@@ -3402,7 +3381,18 @@ async function handleUserLogin(username, password) {
         
         const mappedRole = matchedUser.role === 'admin' ? 'admin' : (matchedUser.role === 'cocina' ? 'cocina' : 'local');
         applyUserRole(mappedRole);
-        
+
+        // Plan B, Task 3 Step 3: PowerSync needs the Supabase session that
+        // just got created above (fetchCredentials reads it). Best-effort,
+        // fire-and-forget -- login must not wait on the initial sync
+        // handshake, and nothing reads from PowerSync yet (Task 4+), so a
+        // failure here has no user-visible effect today.
+        if (window.PowerSyncManager) {
+            window.PowerSyncManager.connect().catch(e => {
+                console.warn("PowerSync connect() failed after login:", e);
+            });
+        }
+
         window.UIManager.showToast(`🔓 ¡Bienvenido/a, ${matchedUser.name}!`, "fa-solid fa-user-check");
         logActivity("Inicio de Sesión", `Ingreso de ${matchedUser.name} (${matchedUser.username}) al perfil ${mappedRole.toUpperCase()}`);
         return true;
@@ -3429,23 +3419,18 @@ async function handleUserLogin(username, password) {
 window.handleUserLogin = handleUserLogin;
 
 /**
- * Handles Quick PIN unlock via Supabase RPC server-side verification
+ * Handles Quick PIN unlock. Plan B, Task 10 (spec §6 punto 2): verification
+ * itself now runs local-first (bcrypt against the synced profiles.pin_hash,
+ * js/supabase.js:verifyQuickPin), no network required once this device has
+ * synced at least once. The 3-fails/60s lockout is per-user and persisted
+ * (js/storage.js:loadPinLockoutState/savePinLockoutState) instead of the
+ * in-memory, shared-with-handleUserLogin lockoutUntil/failedPinAttempts --
+ * verifyQuickPin already does the counting/locking itself, this function
+ * only reads the result back to drive the UI.
  * @param {string} pin 4-digit PIN string
  * @returns {boolean} Success state
  */
 async function handleQuickPINInput(pin) {
-    const now = Date.now();
-    if (now < lockoutUntil) {
-        const remainingSec = Math.ceil((lockoutUntil - now) / 1000);
-        triggerHaptic([80, 80]);
-        if (window.UIManager) window.UIManager.showToast(`⛔ Sistema bloqueado por seguridad. Espera ${remainingSec}s.`, "fa-solid fa-ban");
-        updateLockoutUI();
-        return false;
-    }
-
-    const pinStr = (pin || '').trim();
-    if (!pinStr) return false;
-
     let activeUser = currentUser;
     if (!activeUser) {
         try {
@@ -3458,6 +3443,27 @@ async function handleQuickPINInput(pin) {
         return false;
     }
 
+    // Plan B, Task 11 (spec §6, "Bordes"): quick-PIN reactivation is refused
+    // past 30 days without proven connectivity -- full password login is
+    // the required recovery path, and it inherently needs a connection.
+    if (window.AuthManager && window.AuthManager.isOfflineLimitExceeded(window.StorageManager.loadLastAuthOnlineAt())) {
+        if (window.UIManager) window.UIManager.showToast("🔒 Este dispositivo lleva más de 30 días sin conectarse. Iniciá sesión con tu contraseña para continuar.", "fa-solid fa-lock");
+        return false;
+    }
+
+    const lockout = window.StorageManager.loadPinLockoutState(activeUser.id);
+    const now = Date.now();
+    if (lockout.lockedUntil && now < lockout.lockedUntil) {
+        const remainingSec = Math.ceil((lockout.lockedUntil - now) / 1000);
+        triggerHaptic([80, 80]);
+        if (window.UIManager) window.UIManager.showToast(`⛔ Sistema bloqueado por seguridad. Espera ${remainingSec}s.`, "fa-solid fa-ban");
+        updateLockoutUI(activeUser.id);
+        return false;
+    }
+
+    const pinStr = (pin || '').trim();
+    if (!pinStr) return false;
+
     let isValid = false;
     if (window.SupabaseManager && window.SupabaseManager.isConfigured()) {
         try {
@@ -3468,7 +3474,6 @@ async function handleQuickPINInput(pin) {
     }
 
     if (isValid) {
-        failedPinAttempts = 0;
         currentUser = activeUser;
         // Strictly the stored role -- same mapping handleUserLogin() uses.
         // This used to also grant admin to any username *containing* "admin"
@@ -3483,21 +3488,21 @@ async function handleQuickPINInput(pin) {
         logActivity("Desbloqueo PIN", `Reactivación de sesión de ${activeUser.name} vía PIN rápido`);
         return true;
     } else {
-        failedPinAttempts++;
+        // verifyQuickPin already incremented/persisted this user's lockout
+        // state -- read it back to decide what the UI shows.
+        const updated = window.StorageManager.loadPinLockoutState(activeUser.id);
         triggerHaptic([80, 80]);
 
-        if (failedPinAttempts >= 3) {
-            lockoutUntil = Date.now() + 60000;
-            failedPinAttempts = 0;
+        if (updated.lockedUntil && updated.lockedUntil > Date.now()) {
             if (window.UIManager) window.UIManager.showToast("⛔ 3 intentos fallidos de PIN. Sistema bloqueado por 60 segundos.", "fa-solid fa-triangle-exclamation");
             logActivity("Seguridad Alerta", `Intento fallido de PIN para usuario "${activeUser.username || activeUser.name}"`);
-            
-            updateLockoutUI();
+
+            updateLockoutUI(activeUser.id);
             if (lockoutCountdownInterval) clearInterval(lockoutCountdownInterval);
-            lockoutCountdownInterval = setInterval(updateLockoutUI, 1000);
+            lockoutCountdownInterval = setInterval(() => updateLockoutUI(activeUser.id), 1000);
         } else {
-            const remaining = 3 - failedPinAttempts;
-            if (window.UIManager) window.UIManager.showToast(`❌ PIN incorrecto (${remaining} intento${remaining > 1 ? 's' : ''} restante${remaining > 1 ? 's' : ''}).`, "fa-solid fa-circle-xmark");
+            const remaining = Math.max(0, 3 - (updated.attempts || 0));
+            if (window.UIManager) window.UIManager.showToast(`❌ PIN incorrecto (${remaining} intento${remaining !== 1 ? 's' : ''} restante${remaining !== 1 ? 's' : ''}).`, "fa-solid fa-circle-xmark");
         }
         return false;
     }
@@ -3725,10 +3730,26 @@ async function refreshMySession() {
  */
 async function loadAndRenderActiveDevices() {
     if (currentRole !== 'admin') return;
-    if (window.SupabaseManager.isConfigured() && navigator.onLine) {
-        const sessions = await window.SupabaseManager.fetchActiveSessions();
-        window.UIManager.renderActiveDevices(sessions, myDeviceId, handleEjectDevice, handleTrustDevice);
+    // Plan B, Task 14: this used to just do nothing when offline, leaving
+    // whatever was rendered last (stale) or a blank panel on first open. A
+    // plain empty sessions array would be worse -- renderActiveDevices'
+    // own empty-state says "No hay dispositivos registrados en el
+    // servidor.", exactly the misleading "nothing exists" reading this task
+    // is about. Write the container directly instead of routing through it.
+    if (!window.SupabaseManager.isConfigured() || !navigator.onLine) {
+        const listDiv = document.getElementById('settings-devices-list');
+        if (listDiv) {
+            listDiv.innerHTML = `
+                <div style="text-align: center; padding: 1rem 0; color: var(--color-text-muted); font-size: 0.75rem;">
+                    <i class="fa-solid fa-wifi-slash" style="margin-right: 0.35rem;"></i>
+                    Sin conexión — necesitás internet para ver los dispositivos conectados.
+                </div>
+            `;
+        }
+        return;
     }
+    const sessions = await window.SupabaseManager.fetchActiveSessions();
+    window.UIManager.renderActiveDevices(sessions, myDeviceId, handleEjectDevice, handleTrustDevice);
 }
 
 /**
@@ -4603,7 +4624,6 @@ document.addEventListener('DOMContentLoaded', () => {
         lastAutoSyncAt = now;
 
         window.UIManager.updateConnectionStatus('online');
-        window.SupabaseManager.syncOfflineQueue();
         window.SupabaseManager.subscribeToChanges(handleRealtimeDbUpdate);
         loadAllDataFromSupabase();
     };
@@ -4645,6 +4665,15 @@ document.addEventListener('DOMContentLoaded', () => {
 
     // Ticks the "Actualizado hace X" freshness label in Resumen
     setInterval(updateSyncFreshnessDisplay, 3000);
+
+    // 19. Bind the sync status badge to PowerSync's real status (Task 13).
+    // client.js is a deferred module script loaded before this one -- by
+    // DOMContentLoaded it has already run, so window.PowerSyncManager exists.
+    if (window.PowerSyncManager && window.PowerSyncManager.onStatusChange) {
+        window.PowerSyncManager.onStatusChange(updateSyncStatusUI);
+        const initialStatus = window.PowerSyncManager.getSyncStatus();
+        if (initialStatus) updateSyncStatusUI(initialStatus);
+    }
 
     initAdminDashboardListeners();
     initAgentListeners();

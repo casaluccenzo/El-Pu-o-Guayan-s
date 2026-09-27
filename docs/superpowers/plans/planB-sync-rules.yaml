@@ -1,0 +1,93 @@
+# Plan B, Task 1, Step 3 -- Sync Streams (PowerSync Cloud, "edition: 3").
+# Traduce spec S4 ("Bajan al dispositivo") a streams reales.
+#
+# DECISION FINAL (2026-09-26, confirmada con Gustavo, tras 2 rondas de
+# Validate reales contra el dashboard):
+#
+# El motor de Sync Streams es mas restrictivo de lo que el spec asumia:
+#   1. Las queries deben ser deterministas -- now() esta prohibido por
+#      completo (no es un problema de sintaxis).
+#   2. Comparar una columna de fila contra un connection/subscription
+#      parameter SOLO admite el operador de IGUALDAD. "timestamp >=
+#      subscription.parameter('cutoff')" es invalido -- ni siquiera con el
+#      parametro ya calculado del lado del cliente.
+#   3. Sin GROUP BY / HAVING / ORDER BY / LIMIT. Solo INNER JOIN, sin alias
+#      en la tabla fuente. Subqueries solo como "col IN (SELECT ...)".
+#
+# No hay un patron oficial documentado para "ultimos N dias" bajo estas
+# reglas (existe la posibilidad de un bucket de fecha + IN + json_each con
+# una lista de valores que mande el cliente, pero no esta confirmado y
+# hubiese significado una tercera ronda de prueba y error).
+#
+# Por eso, PARA TODAS las tablas de spec S4 (no solo debts/day_closes):
+# se sincroniza la tabla COMPLETA, sin filtro de ventana movil. Para la
+# escala real de Casa Lucenzo (un solo local) esto es manejable en SQLite
+# aunque acumule anios de historial. Se pierde la optimizacion de espacio
+# del spec original, no la correctitud -- el modelo append-only y el
+# calculo de saldo/stock en JS (Tasks 6-9) no dependen de que la ventana
+# este acotada.
+#
+# Seguimiento (no bloqueante): si el volumen de datos se vuelve un problema
+# real mas adelante, retomar el acotado por ventana usando el "Ask AI" del
+# dashboard de PowerSync o soporte oficial para confirmar el patron exacto
+# de bucket+IN, en vez de reconstruirlo a ciegas.
+#
+# stock_movements ya no necesita el JOIN contra products (esa distincion
+# pastelitos-vs-resto era solo para la ventana de tiempo, que se elimino) --
+# vuelve a ser un solo stream simple.
+#
+# CORRECCION 2 (Task 3, al escribir schema.js): PowerSync necesita que cada
+# fila sincronizada tenga una columna literalmente llamada "id" -- es la
+# clave con la que identifica la fila en SQLite local. sales/expenses/debts/
+# replenishments usan `uuid` como PK real en Postgres, no `id`. Se alias-ea
+# explicitamente (se mantiene tambien la columna `uuid` original, para no
+# romper el codigo JS existente que la lee por ese nombre). Falta re-Validate
+# y Deploy este archivo actualizado en el dashboard antes de seguir.
+
+config:
+  edition: 3
+
+streams:
+  products:
+    auto_subscribe: true
+    query: SELECT * FROM products
+
+  ingredients:
+    auto_subscribe: true
+    query: SELECT * FROM ingredients
+
+  profiles:
+    auto_subscribe: true
+    query: SELECT * FROM profiles
+
+  app_config:
+    auto_subscribe: true
+    query: SELECT * FROM app_config WHERE id = 1
+
+  sales:
+    auto_subscribe: true
+    query: SELECT uuid AS id, uuid, product_id, name, price, timestamp, bcv_rate, cost_at_sale, voided_at, void_reason, location_id FROM sales
+
+  expenses:
+    auto_subscribe: true
+    query: SELECT uuid AS id, uuid, description, amount, timestamp, category, currency, bcv_rate, location_id FROM expenses
+
+  replenishments:
+    auto_subscribe: true
+    query: SELECT uuid AS id, uuid, product_id, name, amount, unit, status, timestamp, location_id FROM replenishments
+
+  stock_movements:
+    auto_subscribe: true
+    query: SELECT * FROM stock_movements
+
+  debts:
+    auto_subscribe: true
+    query: SELECT uuid AS id, uuid, client_name, amount, description, timestamp, location_id FROM debts
+
+  debt_payments:
+    auto_subscribe: true
+    query: SELECT * FROM debt_payments
+
+  day_closes:
+    auto_subscribe: true
+    query: SELECT * FROM day_closes

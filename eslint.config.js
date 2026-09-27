@@ -74,6 +74,23 @@ module.exports = [
         }
     },
     {
+        // Plan B: the PowerSync client bootstrap is real ES modules (it
+        // imports from the '@powersync/web' package) -- everything else
+        // under js/ is script-sourceType, dual CommonJS/browser (see the
+        // comment on browserGlobals above).
+        files: ['js/powersync/**/*.js'],
+        languageOptions: {
+            ecmaVersion: 2022,
+            sourceType: 'module',
+            globals: browserGlobals
+        },
+        rules: {
+            'no-unused-vars': ['warn', { args: 'none', caughtErrors: 'none', varsIgnorePattern: '^_' }],
+            'no-undef': 'warn',
+            'no-empty': ['error', { allowEmptyCatch: true }]
+        }
+    },
+    {
         files: ['api/**/*.js', 'lib/**/*.js', 'scripts/**/*.js', 'tools/**/*.js', 'tests/**/*.js', 'desktop/*.js'],
         languageOptions: {
             ecmaVersion: 2022,
@@ -114,6 +131,9 @@ module.exports = [
         ignores: [
             'www/', 'node_modules/', 'whatsapp-session/', 'supabase/.temp/',
             'desktop/dist/', 'desktop/node_modules/',
+            // Vendored third-party build output (js/powersync/vendor/, via
+            // `npx @powersync/web copy-assets`) -- not our code, minified.
+            'js/powersync/vendor/',
             // Every dot-directory is local tooling (editor, AI skills/agents,
             // deploy, worktrees) -- all git-ignored, none of it application
             // code. Without this, `eslint .` scans their .mjs helpers and
