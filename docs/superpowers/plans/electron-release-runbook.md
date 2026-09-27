@@ -33,6 +33,37 @@ Eso hace, en orden:
 Para un cambio grande: `npm version minor` a mano antes, después
 `npm run release:web && npm run release:desktop && git push --tags`.
 
+## Otro negocio (BRAND)
+
+La app de escritorio toma nombre, appId, ícono y repo de releases de
+`img/brands/<BRAND>/brand.json` (bloque `desktop`, ver
+`desktop/brand-config.js`). Sin `BRAND` sale Casa Lucenzo como siempre.
+
+Para El Puño Guayanés lo más simple es GitHub Actions: en el repo,
+Actions → "Release escritorio" → Run workflow. Compila en Windows y publica la
+versión de `package.json` en Releases. Necesita una sola vez el secret
+`SUPABASE_ANON_KEY` (y opcional `SENTRY_DSN`) en Settings → Secrets and
+variables → Actions, con el mismo valor que tiene el proyecto de El Puño en
+Vercel. Sin la key el workflow corta antes de publicar.
+
+A mano, desde una PC con Windows y en una terminal con estas
+variables (`BRAND` y las mismas `SUPABASE_URL`, `SUPABASE_ANON_KEY`,
+`POWERSYNC_URL` y `SENTRY_DSN` que tiene el proyecto de El Puño en Vercel, porque
+el `.exe` lleva una copia congelada de `www/`; sin ellas la app queda apuntando
+a los valores por defecto de Casa Lucenzo):
+
+```powershell
+$env:BRAND="el-puno-guayanes"; $env:SUPABASE_URL="..."; $env:SUPABASE_ANON_KEY="..."
+$env:POWERSYNC_URL="..."; $env:SENTRY_DSN="..."; $env:GH_TOKEN="<PAT con acceso a El-Pu-o-Guayan-s>"
+npm run release:desktop
+```
+
+Sube `el-puno-guayanes-setup-X.Y.Z.exe` + `latest.yml` + `.blockmap` a una
+Release `vX.Y.Z` de `casaluccenzo/El-Pu-o-Guayan-s`, y las PCs instaladas se
+actualizan desde ahí. Para probar sin publicar: `npm run build` y
+`npm --prefix desktop run dist` con las mismas variables; el instalador queda en
+`desktop/dist/`. El acceso directo se llama "El Puño Guayanés".
+
 ## Verificar
 
 - Vercel: casalucenzo.com carga, el footer dice `v1.0.1`.

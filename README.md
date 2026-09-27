@@ -26,7 +26,7 @@ Shell de Electron que empaqueta una copia congelada de la app — no es una vent
 
 **Descargar**: [última versión en GitHub Releases](https://github.com/casaluccenzo/El-Pu-o-Guayan-s/releases/latest) → descargar el `.exe` → ejecutar. Instalador `oneClick`, no pide elegir carpeta.
 
-*(Si todavía no hay ninguna release publicada acá, es porque falta correr la primera — ver `desktop/` en el repo de Casa Lucenzo para el proceso; la variante para este negocio publica a este mismo repo.)*
+*(Si todavía no hay ninguna release publicada acá, es porque falta correr la primera: ver la sección "Otro negocio (BRAND)" de `docs/superpowers/plans/electron-release-runbook.md`. Con `BRAND=el-puno-guayanes` el `.exe` sale como "El Puño Guayanés" y publica a este mismo repo.)*
 
 ---
 

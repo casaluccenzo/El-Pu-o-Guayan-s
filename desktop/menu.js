@@ -1,7 +1,10 @@
 const { Menu, dialog } = require('electron');
 const updater = require('./updater');
 
-const APP_VERSION = require('./package.json').version;
+const pkg = require('./package.json');
+const APP_VERSION = pkg.version;
+// brandName lo inyecta electron-builder (extraMetadata, ver brand-config.js).
+const BRAND_NAME = pkg.brandName || 'Casa Lucenzo';
 
 function buildMenu(win) {
   const openAbout = () => {
@@ -13,8 +16,8 @@ function buildMenu(win) {
         if (!ok) {
           dialog.showMessageBox(win, {
             type: 'info',
-            title: 'Acerca de Casa Lucenzo',
-            message: 'Casa Lucenzo',
+            title: `Acerca de ${BRAND_NAME}`,
+            message: BRAND_NAME,
             detail: `Versión ${APP_VERSION} (Windows)`
           });
         }
@@ -24,7 +27,7 @@ function buildMenu(win) {
 
   const template = [
     {
-      label: 'Casa Lucenzo',
+      label: BRAND_NAME,
       submenu: [
         { label: 'Acerca de', click: openAbout },
         { label: 'Buscar actualizaciones', click: () => updater.checkNow() },
