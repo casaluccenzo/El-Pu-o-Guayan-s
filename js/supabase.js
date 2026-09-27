@@ -665,6 +665,76 @@ async function updateProductStock(id, stock, max, initialStock) {
     }
 }
 
+// Plan B, Task 6: modelo append-only para stock (spec §5.1a). En vez de
+// pisar products.stock/max/initial_stock, cada carga/venta/recuento inserta
+// UNA fila aca; recompute_product_stock() (migracion 033) recalcula esas 3
+// columnas server-side a partir de la suma de estos movimientos + la hora
+// del ultimo cierre. `type` (spec §5.1a): 'load' carga/recuento-hacia-arriba,
+// 'sale' -1 del carrito, 'sale_return' +1 del carrito, 'count_down' recuento
+// hacia abajo. El caller decide el type -- esta funcion no interpreta el
+// signo de delta.
+async function insertStockMovement({ productId, delta, type, sourceUuid = null, deviceId = null, note = null }) {
+    const id = crypto.randomUUID ? crypto.randomUUID() : 'sm_' + Math.random().toString(36).substring(2) + Date.now().toString(36);
+    const createdAt = new Date().toISOString();
+    const localDb = getLocalDb();
+    if (localDb) {
+        try {
+            await localDb.execute(
+                `INSERT INTO stock_movements (id, product_id, delta, type, source_uuid, device_id, created_at, location_id, note)
+                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+                [id, productId, delta, type, sourceUuid, deviceId, createdAt, DEFAULT_LOCATION_ID, note]
+            );
+        } catch (e) {
+            console.error("PowerSync local insertStockMovement failed:", e);
+        }
+        return;
+    }
+    if (!client) return;
+    const payload = {
+        id, product_id: productId, delta, type, source_uuid: sourceUuid,
+        device_id: deviceId, created_at: createdAt, note
+    };
+    try {
+        if (!navigator.onLine) {
+            enqueueOfflineOp('stock_movements', 'insert', payload);
+            return;
+        }
+        const { error } = await client.from('stock_movements').insert(payload);
+        if (error) throw error;
+    } catch (e) {
+        console.error("Supabase insertStockMovement failed. Enqueuing offline...", e);
+        enqueueOfflineOp('stock_movements', 'insert', payload);
+    }
+}
+
+// Task 6 Step 2: mientras un stock_movement recien insertado no subio a
+// Postgres todavia, recompute_product_stock() no corrio -- el stock/max/
+// initial_stock locales de ese producto quedan un instante desactualizados
+// respecto al valor optimista que ya se mostro en pantalla. Un refetch de
+// productos en esa ventana (loadAllDataFromSupabase, cada 3 min o al
+// reconectar) pisaria ese valor optimista con el viejo. `getCrudBatch` es de
+// solo lectura si no se llama a `.complete()` -- a diferencia de
+// `getNextCrudTransaction()` (que Task 5 SI drena), esto es un peek seguro,
+// no vacia la cola.
+async function getPendingStockMovementProductIds() {
+    const localDb = getLocalDb();
+    if (!localDb) return new Set();
+    try {
+        const batch = await localDb.getCrudBatch(1000);
+        const ids = new Set();
+        if (!batch) return ids;
+        for (const entry of batch.crud) {
+            if (entry.table === 'stock_movements' && entry.opData && entry.opData.product_id) {
+                ids.add(entry.opData.product_id);
+            }
+        }
+        return ids;
+    } catch (e) {
+        console.error("getPendingStockMovementProductIds failed:", e);
+        return new Set();
+    }
+}
+
 async function deleteProduct(id) {
     const localDb = getLocalDb();
     if (localDb) {
@@ -1960,6 +2030,8 @@ window.SupabaseManager = {
     upsertProduct,
     updateProductStock,
     deleteProduct,
+    insertStockMovement,
+    getPendingStockMovementProductIds,
     insertSale,
     insertSales,
     upsertSales,

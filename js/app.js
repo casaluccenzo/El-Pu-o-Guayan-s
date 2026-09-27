@@ -423,6 +423,27 @@ function applyStockCount(product, targetStock) {
 }
 
 /**
+ * Plan B, Task 6: single choke point for persisting a stock change.
+ * Records the movement in stock_movements (append-only, spec §5.1a) instead
+ * of writing products.stock/max/initial_stock directly -- Postgres'
+ * recompute_product_stock() (migracion 033) derives those from the sum of
+ * these movements. Silently skips a zero delta: nothing physically moved
+ * (e.g. a recount clamped to the same value), so there's nothing to log.
+ * @param {Object} product Product the movement applies to
+ * @param {number} delta Signed change actually applied to product.stock
+ * @param {'load'|'sale'|'sale_return'|'count_down'} type Movement kind (spec §5.1a)
+ * @param {string} [sourceUuid] Traceability link (e.g. the replenishment uuid for a 'load')
+ */
+function recordStockMovement(product, delta, type, sourceUuid) {
+    if (!delta) return;
+    if (window.SupabaseManager.isConfigured()) {
+        window.SupabaseManager.insertStockMovement({
+            productId: product.id, delta, type, sourceUuid: sourceUuid || null, deviceId: myDeviceId
+        });
+    }
+}
+
+/**
  * Handle stock adjustments, records transactions, triggers vibrations and floating numbers
  * @param {string} id Product identifier
  * @param {number} amount Change amount (+1 or -1)
@@ -465,9 +486,7 @@ function adjustStock(id, amount, event) {
         product.stock = Math.max(0, product.stock - 1);
         window.StorageManager.saveProducts(products);
 
-        if (window.SupabaseManager.isConfigured()) {
-            window.SupabaseManager.updateProductStock(product.id, product.stock);
-        }
+        recordStockMovement(product, product.stock - originalStock, 'sale');
 
         // Audio warning if stock falls under threshold
         if (product.stock <= product.min && originalStock > product.min) {
@@ -492,12 +511,11 @@ function adjustStock(id, amount, event) {
 
         triggerHaptic(15);
 
+        const beforeLoad = product.stock;
         applyStockLoad(product, 1);
         window.StorageManager.saveProducts(products);
 
-        if (window.SupabaseManager.isConfigured()) {
-            window.SupabaseManager.updateProductStock(product.id, product.stock, product.max, product.initial_stock);
-        }
+        recordStockMovement(product, product.stock - beforeLoad, 'load');
 
         window.UIManager.renderLocal(products, adjustStock, activeCategory, searchQuery);
     }
@@ -537,9 +555,7 @@ function handleCartQtyChange(id, newQty) {
     product.stock = Math.max(0, product.stock - diff);
     window.StorageManager.saveProducts(products);
 
-    if (window.SupabaseManager.isConfigured()) {
-        window.SupabaseManager.updateProductStock(product.id, product.stock);
-    }
+    recordStockMovement(product, product.stock - originalStock, diff > 0 ? 'sale' : 'sale_return');
 
     // Update cart items array
     if (newQty === 0) {
@@ -601,16 +617,11 @@ function handleAddToCart(productId) {
     }
     localStorage.setItem('casa_lucenzo_current_cart', JSON.stringify(currentCart));
 
+    const beforeAdd = product.stock;
     product.stock = Math.max(0, product.stock - 1);
     window.StorageManager.saveProducts(products);
 
-    if (window.SupabaseManager.isConfigured()) {
-        try {
-            window.SupabaseManager.updateProductStock(product.id, product.stock);
-        } catch(e) {
-            addToOfflineQueue('updateStock', { id: product.id, stock: product.stock });
-        }
-    }
+    recordStockMovement(product, product.stock - beforeAdd, 'sale');
 
     window.UIManager.renderActiveCart(currentCart, handleAddToCart, handleRemoveFromCart, handleClearCart, handleCheckoutCart);
     window.UIManager.renderLocal(products, adjustStock, activeCategory, searchQuery);
@@ -629,15 +640,10 @@ function handleRemoveFromCart(productId) {
     const product = products.find(p => p.id === productId);
 
     if (product) {
+        const beforeRemove = product.stock;
         product.stock = product.stock >= product.max ? product.stock + 1 : Math.min(product.max, product.stock + 1);
         window.StorageManager.saveProducts(products);
-        if (window.SupabaseManager.isConfigured()) {
-            try {
-                window.SupabaseManager.updateProductStock(product.id, product.stock);
-            } catch(e) {
-                addToOfflineQueue('updateStock', { id: product.id, stock: product.stock });
-            }
-        }
+        recordStockMovement(product, product.stock - beforeRemove, 'sale_return');
     }
 
     cartItem.quantity--;
@@ -661,10 +667,9 @@ async function handleClearCart() {
         currentCart.forEach(cartItem => {
             const product = products.find(p => p.id === cartItem.productId);
             if (product) {
+                const beforeClear = product.stock;
                 product.stock = product.stock >= product.max ? product.stock + cartItem.quantity : Math.min(product.max, product.stock + cartItem.quantity);
-                if (window.SupabaseManager.isConfigured()) {
-                    window.SupabaseManager.updateProductStock(product.id, product.stock);
-                }
+                recordStockMovement(product, product.stock - beforeClear, 'sale_return');
             }
         });
 
@@ -1232,16 +1237,12 @@ async function updateProductStockDirect(id, newStock) {
     if (!product) return;
 
     triggerHaptic(15);
+    const beforeCount = product.stock;
     applyStockCount(product, newStock);
     window.StorageManager.saveProducts(products);
 
-    if (window.SupabaseManager.isConfigured()) {
-        try {
-            await window.SupabaseManager.updateProductStock(product.id, product.stock, product.max, product.initial_stock);
-        } catch (e) {
-            console.error("Failed to update product stock and max in Supabase", e);
-        }
-    }
+    const countDelta = product.stock - beforeCount;
+    recordStockMovement(product, countDelta, countDelta > 0 ? 'load' : 'count_down');
 
     renderAllViews();
     window.UIManager.showToast(`✅ Vitrina actualizada: "${product.name}" ahora tiene ${product.stock} ${product.unit || 'unid.'}.`, "fa-solid fa-circle-check");
@@ -1258,17 +1259,12 @@ async function addProductStockDirect(id, amountToAdd) {
     if (amountToAdd <= 0) return;
 
     triggerHaptic(15);
+    const beforeAdd = product.stock;
     applyStockLoad(product, amountToAdd);
 
     window.StorageManager.saveProducts(products);
 
-    if (window.SupabaseManager.isConfigured()) {
-        try {
-            await window.SupabaseManager.updateProductStock(product.id, product.stock, product.max, product.initial_stock);
-        } catch (e) {
-            console.error("Failed to add product stock and max in Supabase", e);
-        }
-    }
+    recordStockMovement(product, product.stock - beforeAdd, 'load');
 
     renderAllViews();
     window.UIManager.showToast(`✅ Vitrina actualizada: Se sumaron ${amountToAdd} piezas a "${product.name}". Total: ${product.stock}.`, "fa-solid fa-circle-check");
@@ -1307,10 +1303,9 @@ async function confirmReceipt() {
     try {
         pending.forEach(dispatch => {
             const product = products.find(p => p.id === dispatch.productId);
+            const beforeReceipt = product ? product.stock : 0;
             if (product && applyStockLoad(product, dispatch.amount)) {
-                if (window.SupabaseManager.isConfigured()) {
-                    window.SupabaseManager.updateProductStock(product.id, product.stock, product.max, product.initial_stock);
-                }
+                recordStockMovement(product, product.stock - beforeReceipt, 'load', dispatch.uuid);
                 logActivity("Recepción Vitrina", `Recibidos ${dispatch.amount} ${product.unit || 'unid.'} de ${product.name} en vitrina. Stock actual: ${product.stock}/${product.max}`);
             }
             dispatch.status = 'recibido';
@@ -1340,12 +1335,11 @@ function resetToMax() {
     triggerHaptic(15);
     products.forEach(p => {
         const cat = p.category || (window.StorageManager ? window.StorageManager.getProductCategory(p) : 'pastelitos');
+        const beforeReset = p.stock || 0;
         // Topping the shelf back up to capacity is a load like any other: only
         // the missing pieces enter, and the day's baseline grows by that much.
         if (cat === 'pastelitos' && applyStockLoad(p, (p.max || 0) - (p.stock || 0))) {
-            if (window.SupabaseManager.isConfigured()) {
-                window.SupabaseManager.updateProductStock(p.id, p.stock, p.max, p.initial_stock);
-            }
+            recordStockMovement(p, p.stock - beforeReset, 'load');
         }
     });
     window.StorageManager.saveProducts(products);
@@ -2426,10 +2420,33 @@ async function loadAllDataFromSupabase() {
 
     // Save and load products (auto-merge missing default products like dulces)
     if (supProducts && supProducts.length > 0) {
-        products = supProducts.map(p => ({
-            ...p,
-            category: window.StorageManager ? window.StorageManager.getProductCategory(p) : (p.category || 'pastelitos')
-        }));
+        // Plan B, Task 6: a product with a stock_movement still queued locally
+        // (not uploaded yet) hasn't had recompute_product_stock() run for it in
+        // Postgres -- a refetch right now would read its old stock/max/
+        // initial_stock and stomp the optimistic value already on screen with a
+        // stale one (visible as the counter "jumping back"). This is a full
+        // wholesale reassignment of `products`, not a per-field merge, so the
+        // in-memory optimistic value has to be preserved explicitly here for
+        // just those products, not just left alone.
+        const previousProductsById = new Map(products.map(p => [p.id, p]));
+        const pendingStockProductIds = window.SupabaseManager.getPendingStockMovementProductIds
+            ? await window.SupabaseManager.getPendingStockMovementProductIds()
+            : new Set();
+        products = supProducts.map(p => {
+            const merged = {
+                ...p,
+                category: window.StorageManager ? window.StorageManager.getProductCategory(p) : (p.category || 'pastelitos')
+            };
+            if (pendingStockProductIds.has(p.id)) {
+                const prev = previousProductsById.get(p.id);
+                if (prev) {
+                    merged.stock = prev.stock;
+                    merged.initial_stock = prev.initial_stock;
+                    merged.max = prev.max;
+                }
+            }
+            return merged;
+        });
     } else {
         products = window.StorageManager.loadProducts();
     }

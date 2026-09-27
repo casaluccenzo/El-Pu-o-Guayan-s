@@ -627,12 +627,26 @@ ejecutar, no asumirlo de una fecha de spec pasada).
 ## Task 6: Stock — `adjustStock`/`applyStockLoad`/`applyStockCount` insertan `stock_movements`
 
 **Files:**
-- Modify: `js/app.js` — `applyStockLoad` (392-400), `applyStockCount`
-  (411-423), `adjustStock` (431-502)
-- Modify: `js/supabase.js` — nueva función `insertStockMovement(...)`
-  reemplaza el uso directo de `updateProductStock` (477) desde estos 3
-  call sites (esa función queda para los paths que de verdad necesiten
-  pisar `max` manualmente, si quedara alguno)
+- Modify: `js/app.js` — el archivo original solo listaba `applyStockLoad`
+  (392-400), `applyStockCount` (411-423) y `adjustStock` (431-502). Al
+  mapear los call sites reales de `updateProductStock` se encontraron 6 más
+  con la misma lógica conceptual (mover stock vitrina↔carrito, o
+  carga/recuento) que quedaban afuera: `handleCartQtyChange`,
+  `handleAddToCart`, `handleRemoveFromCart`, `handleClearCart`,
+  `updateProductStockDirect`, `addProductStockDirect`, `confirmReceipt`,
+  `resetToMax` (8, no 6 -- se corrigió sobre la marcha). Dejar solo las 3
+  originales habría dejado dos mecanismos escribiendo `products.stock` a la
+  vez (movimientos nuevos + `updateProductStock` directo de las otras 6),
+  con el trigger de Task 2 pisando uno u otro de forma impredecible en dev
+  (donde la migración 033 ya corre). Confirmado con el usuario antes de
+  tocar código — decidió alcance completo ahora, no incremental.
+  `handleUndoSale` (línea ~823, con su propio `updateProductStock`) NO se
+  tocó: es explícitamente Task 7 (`voidSale`), no Task 6.
+- Modify: `js/supabase.js` — nueva función `insertStockMovement(...)` +
+  `getPendingStockMovementProductIds()` (Step 2), reemplazan el uso directo
+  de `updateProductStock` desde los 9 call sites de arriba (esa función
+  queda para los paths que de verdad necesiten pisar `max` manualmente, si
+  quedara alguno).
 
 **Interfaces:**
 - Consumes: Task 2 (columnas reales mantenidas por trigger) y Task 3
@@ -645,38 +659,95 @@ ejecutar, no asumirlo de una fecha de spec pasada).
   el movimiento a Postgres. Localmente, mientras no sincronizó, la UI debe
   mostrar el stock optimista (ver Step 2).
 
-- [ ] **Step 1: Mapear cada call site a un `type` de movimiento**
+- [x] **Step 1: Mapear cada call site a un `type` de movimiento**
 
-  Tabla exacta del spec §5.1a (sección "Caminos que hoy tocan los
-  contadores"): carrito +1/-1 → `sale_return`/`sale` con `delta=±1`; carga
-  de cocina (`applyStockLoad`) → `load` con `delta=+N`; recuento hacia
-  arriba → `load` con `delta=Δ`; recuento hacia abajo (`applyStockCount`
-  bajando) → `count_down` con `delta` negativo.
+  Se usó un patrón uniforme en los 9 call sites en vez de asumir el delta:
+  capturar `before = product.stock` justo antes de la mutación existente
+  (sin tocarla), dejar que la lógica ya existente mute `product.stock`/
+  `initial_stock`/`max` como siempre (optimismo en memoria intacto), y
+  recién ahí calcular `delta = product.stock - before` y elegir `type` según
+  el signo o la acción concreta. Esto evita depender de que el delta
+  "teórico" (ej. `-diff` en `handleCartQtyChange`) coincida exactamente con
+  el aplicado tras los `Math.max`/`Math.min` de clamping que ya existían.
+  Un `delta` de 0 no inserta movimiento (nada pasó físicamente). Mapeo
+  final: carrito ±1 (`adjustStock`, `handleAddToCart`) → `sale`;
+  `handleRemoveFromCart`/`handleClearCart` → `sale_return`;
+  `handleCartQtyChange` → `sale` o `sale_return` según el signo del delta
+  real; `adjustStock`(+1)/`addProductStockDirect`/`confirmReceipt`/
+  `resetToMax` → `load`; `updateProductStockDirect` → `load` o `count_down`
+  según si `applyStockCount` subió o bajó. `confirmReceipt` además linkea
+  `source_uuid` = el uuid de la reposición recibida.
 
-- [ ] **Step 2: Stock optimista en la UI mientras no sincronizó**
+- [x] **Step 2: Stock optimista en la UI mientras no sincronizó**
 
-  Como `products.stock` ya no se escribe local, la UI (que hoy lee
-  `product.stock` directo tras mutar el objeto en memoria) necesita seguir
-  mostrando el número correcto al toque, antes de que el trigger de
-  Postgres corra. Opciones a evaluar: (a) mantener un cálculo optimista en
-  JS espejando la fórmula del spec §5.1a sobre los `stock_movements` locales
-  no confirmados todavía, o (b) usar una vista/query local en PowerSync que
-  sume los movimientos en tiempo real (`db.watch()`). Preferir (b) si el
-  query local da la performance necesaria (~29 productos, trivial) — evita
-  mantener dos implementaciones de la misma fórmula.
+  Se descartó la opción (a) del plan original (recompute-formula paralela
+  en JS) y la (b) (`db.watch()`) a favor de una tercera, más simple,
+  sugerida por Gemini: la UI ya mutaba `product.stock` en memoria de forma
+  optimista ANTES de este Task (arquitectura preexistente) — eso no cambia,
+  solo cambia qué se persiste. Se evita mantener una segunda implementación
+  de la fórmula del trigger.
 
-- [ ] **Step 3: Reescribir `applyStockLoad`, `applyStockCount`, `adjustStock`**
+  Encontrado al revisar `loadAllDataFromSupabase()`: reasigna `products`
+  por completo (no hace merge campo por campo), así que un refetch
+  mientras un movimiento sigue sin subir pisaría el valor optimista con uno
+  viejo (el trigger todavía no corrió) -- un parpadeo hacia atrás real,
+  posible en la ventana entre reconectar y que la cola de PowerSync suba.
+  Se agregó `getPendingStockMovementProductIds()` (peek de solo lectura
+  sobre `db.getCrudBatch()`, sin drenar la cola — no confundir con
+  `getNextCrudTransaction()` de Task 5, que sí la drena) y se usa en el
+  merge de productos para preservar `stock`/`initial_stock`/`max` del valor
+  en memoria anterior solo para los productos con un movimiento todavía
+  pendiente.
 
-- [ ] **Step 4: Test unitario — la fórmula del spec en JS**
+- [x] **Step 3: Reescribir los 9 call sites (ver Files)**
 
-  Extender `tests/unit.test.js`: dado un set de `stock_movements` y un
-  `last_close_at`, el cálculo optimista en JS (Step 2a si se eligió esa
-  vía) debe dar el mismo resultado que la fórmula de Postgres — mismo
-  espíritu que Plan A Task 6 pero del lado del cliente.
+- [x] **Step 4: N/A con el diseño elegido**
 
-- [ ] **Step 5: Test manual — offline, vender, verificar stock negativo no bloquea (spec R3)**
+  El test que pedía este Step (comparar una fórmula de recompute en JS
+  contra la de Postgres) aplicaba a la opción (a) de Step 2, que no se usó.
+  No hay una segunda fórmula que verificar del lado del cliente — el número
+  optimista es simplemente el que la UI ya mutaba antes de este Task.
 
-- [ ] **Step 6: Commit**
+- [x] **Step 5: Verificación real contra `casa-lucenzo-dev`**
+
+  Login real (`test@casalucenzo.com`, Admin). No se pudo forzar un offline
+  genuino en este entorno de navegador (mismo límite que Task 5 Step 2), asi
+  que se verificó cada mecanismo por separado, con lecturas directas a
+  Postgres antes/después:
+
+  - `insertStockMovement` real (`type: 'load'`, delta +5) sobre un producto
+    existente: la fila apareció en `stock_movements` con los campos
+    correctos, y `recompute_product_stock()` (migración 033) recalculó
+    `stock`/`initial_stock` correctamente en Postgres (5→10, 7→12; `max` sin
+    cambios, ya cubría el nuevo piso).
+  - **Spec R3 confirmada tal cual**: un movimiento `type: 'sale'` con
+    `delta: -50` llevó `stock` a **-40** sin error, sin bloqueo, sin clamp a
+    0 -- exactamente "las ventas nunca se rechazan, el stock puede quedar
+    negativo".
+  - `getPendingStockMovementProductIds()` (el guard de Step 2): confirmado
+    que detecta el producto con movimiento recién insertado (todavía en la
+    cola local) y que la lista vuelve a quedar vacía ~3.5s después, una vez
+    subido -- el mecanismo que evita el parpadeo funciona.
+  - Un tap real por UI (botón "+" en Vitrina sobre "Malta 355ml",
+    `handleAddToCart`) generó el movimiento (`type: 'sale', delta: -1`) con
+    el `device_id` real del dispositivo, y `products.stock` bajó
+    correctamente en Postgres (28→27) -- confirma el camino completo
+    click→`recordStockMovement`→`insertStockMovement`→trigger, no solo la
+    llamada directa a la función.
+  - Datos de prueba en `seed-dul-a`/`seed-beb-a` restaurados a su `stock`
+    original al terminar (quedó un desvío menor, inofensivo, en
+    `initial_stock` -- son productos de prueba, no reales).
+
+  Aparte, no relacionado a Task 6: el 401 JWKS transitorio del sync-stream
+  que ya había aparecido en Task 5 **volvió a aparecer, esta vez sin
+  autoresolverse** dentro de la ventana observada (login, alrededor de 15
+  reintentos seguidos, más un "400" suelto). Sigue sin afectar las
+  escrituras (confirmado arriba: todo subió bien igual), pero si es
+  persistente y no un blip aislado, vale la pena revisar la config de JWKS
+  en el dashboard de PowerSync para `casa-lucenzo-dev` -- ya son dos
+  sesiones distintas donde aparece.
+
+- [x] **Step 6: Commit**
 
 ---
 
