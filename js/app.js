@@ -255,7 +255,7 @@ function triggerHaptic(pattern) {
 function handleCategoryChange(catId) {
     activeCategory = catId;
     triggerHaptic(15);
-    window.UIManager.renderCategoryFilterBar(activeCategory, handleCategoryChange);
+    window.UIManager.renderCategoryFilterBar(activeCategory, handleCategoryChange, products);
     window.UIManager.renderLocal(products, adjustStock, activeCategory, searchQuery);
 }
 
@@ -2789,7 +2789,7 @@ async function deactivateUserHandler(id) {
  */
 function renderAllViews() {
     window.UIManager.renderSearchBar(handleSearchChange);
-    window.UIManager.renderCategoryFilterBar(activeCategory, handleCategoryChange);
+    window.UIManager.renderCategoryFilterBar(activeCategory, handleCategoryChange, products);
     window.UIManager.renderLocal(products, adjustStock, activeCategory, searchQuery);
     window.UIManager.renderActiveCart(currentCart, handleAddToCart, handleRemoveFromCart, handleClearCart, handleCheckoutCart);
     window.UIManager.renderPendingDispatches(replenishments, confirmReceipt);

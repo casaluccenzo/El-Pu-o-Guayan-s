@@ -170,16 +170,23 @@ function renderSearchBar(onSearchChange) {
  * Render category selector filters
  * @param {string} activeCategory Selected category ID
  * @param {Function} onCategoryChange Callback when category changes
+ * @param {Array} products Current product list, used to hide categories with no products
+ *   (different deployments of this same codebase carry different catalogs -- e.g. a
+ *   location that doesn't sell "dulces" shouldn't show that pill at all).
  */
-function renderCategoryFilterBar(activeCategory, onCategoryChange) {
+function renderCategoryFilterBar(activeCategory, onCategoryChange, products) {
     const container = document.getElementById('category-filter-container');
     if (!container) return;
 
-    const categories = [
-        { id: 'todos', name: 'Todo' },
+    const allCategories = [
         { id: 'pastelitos', name: 'Pastelitos' },
         { id: 'bebidas', name: 'Bebidas' },
         { id: 'dulces', name: 'Dulces' }
+    ];
+    const presentIds = new Set((products || []).map(p => p.category));
+    const categories = [
+        { id: 'todos', name: 'Todo' },
+        ...allCategories.filter(cat => presentIds.has(cat.id))
     ];
 
     container.innerHTML = '';
