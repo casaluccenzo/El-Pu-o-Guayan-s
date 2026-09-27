@@ -1396,9 +1396,64 @@ ejecutar, no asumirlo de una fecha de spec pasada).
   manual a reflejar `PowerSyncManager.getSyncStatus()` (sincronizado /
   pendiente / offline) en tiempo real.
 
-- [ ] **Step 1: Suscribirse a los eventos de estado de PowerSync**
-- [ ] **Step 2: Actualizar el badge existente**
-- [ ] **Step 3: Commit**
+- [x] **Step 1: Suscribirse a los eventos de estado de PowerSync**
+
+  `js/powersync/client.js`: instalé `@powersync/web@2.4.1` real en un
+  scratchpad (misma técnica que con bcryptjs/supabase-js) para leer el
+  `.d.ts` real de `SyncStatus` en vez de confiar en la doc — confirmé los
+  campos `connected`/`connecting`/`uploading`/`downloading`/`hasSynced`/
+  `lastSyncedAt`, y que `db.registerListener({statusChanged})` es real y
+  devuelve un disposer (`BaseObserver.registerListener`). Agregué
+  `onStatusChange(cb)` (wrapper de `registerListener`) y
+  `getUploadQueueStats()` (cuenta real de la cola de subida CRUD de
+  PowerSync — reemplaza el conteo manual de la cola vieja que Task 12
+  retiró) al objeto `window.PowerSyncManager`.
+
+  También agregué `hasAttemptedConnect()`: antes de que `connect()` se llame
+  por primera vez (pre-login, o un dispositivo que nunca configuró
+  PowerSync), `currentStatus.connected` es `false` de la misma forma que si
+  estuviera genuinamente offline — no hay un tercer booleano para
+  distinguir "nunca lo intentó" de "está caído". Sin este guard, el badge
+  hubiera mostrado "Sin Conexión" en la propia pantalla de login. Verificado
+  en navegador real: `false` antes de loguearse, `true` después.
+
+- [x] **Step 2: Actualizar el badge existente**
+
+  `js/app.js`: `updateSyncStatusUI(status)`, suscrita dentro del bloque
+  `DOMContentLoaded` (paso "19."). Estados: `!connected` → rojo "Sin
+  Conexión"; `uploading || downloading` → ámbar, con el conteo real de
+  `getUploadQueueStats()` si hay algo pendiente; conectado y sin nada en
+  vuelo → badge oculto (todo al día).
+
+  **Hallazgo real durante la verificación, no anticipado por el plan**:
+  `#conn-status` (el punto del header) ya tenía un driver propio
+  (`updateConnectionStatus`, disparado por el canal realtime de Supabase en
+  `autoSyncAndReconnect`/`subscribeToChanges`) que seguía activo. Verificado
+  en navegador real que ambos drivers competían por el mismo elemento —
+  PowerSync lo ponía en "offline" y, segundos después, un reconnect de
+  Supabase realtime lo volvía a poner en "online", parpadeando entre dos
+  señales distintas. Arreglado en `js/ui.js`: `updateConnectionStatus`
+  acepta un segundo argumento `source`; una vez que PowerSync sincronizó al
+  menos una vez (`hasSynced`), solo los llamados con `source:'powersync'`
+  (desde `updateSyncStatusUI`) pueden tocar el punto — los llamados viejos
+  de Supabase realtime se ignoran. Sin este fix, `#conn-status` habría
+  quedado inservible en cuanto PowerSync entrara en juego.
+
+  Verificación real contra `casa-lucenzo-dev` (mismo browser reusado de
+  Task 12 — reveló un artefacto propio de esta sesión larga de pruebas, no
+  un bug: pestañas viejas del mismo origen `localhost:4173`, abiertas desde
+  pruebas anteriores en esta misma conversación, seguían compartiendo el
+  SharedWorker de PowerSync y sosteniendo una conexión real desde antes,
+  así que un `insertSale` de diagnóstico llegó a Postgres real pese a que
+  esta pestaña reportaba `connected:false` — confirmado con
+  `read_network_requests` y cerrando esas pestañas. Con una sola pestaña:
+  pre-login badge oculto y `hasAttemptedConnect()` en `false`; post-login
+  sin `powerSyncUrl` disponible esta sesión, badge en rojo "Sin Conexión" y
+  `#conn-status` en `offline`, estable durante 8s+ de reconexiones de
+  Supabase realtime de fondo (ya no compite). Sin errores nuevos en
+  consola más allá del ya esperado "no hay powerSyncUrl configurada".
+
+- [x] **Step 3: Commit**
 
 ---
 

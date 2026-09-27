@@ -1825,8 +1825,10 @@ function initPinKeypad(onPINValid) {
 /**
  * Update the connection status dot
  * @param {'online' | 'local' | 'offline'} status Status mode
+ * @param {string} [source] Pass 'powersync' for calls from
+ *   updateSyncStatusUI (js/app.js) -- see the Task 13 note below.
  */
-function updateConnectionStatus(status) {
+function updateConnectionStatus(status, source) {
     const dot = document.getElementById('conn-status');
     if (!dot) return;
 
@@ -1838,8 +1840,20 @@ function updateConnectionStatus(status) {
         return;
     }
 
+    // Plan B, Task 13: once PowerSync has completed its first sync, its own
+    // connected/disconnected signal is authoritative (js/app.js's
+    // updateSyncStatusUI calls this with source:'powersync'). Without this
+    // guard, the older Supabase-realtime-driven callers below
+    // (autoSyncAndReconnect, subscribeToChanges' reconnect) kept fighting
+    // over this same dot -- confirmed live, PowerSync set it to "offline"
+    // and a realtime reconnect flipped it back to "online" moments later.
+    if (source !== 'powersync' && window.PowerSyncManager && window.PowerSyncManager.getSyncStatus) {
+        const psStatus = window.PowerSyncManager.getSyncStatus();
+        if (psStatus && psStatus.hasSynced) return;
+    }
+
     dot.className = `conn-status ${status}`;
-    
+
     let title = 'Sincronizado con base de datos (En vivo)';
     if (status === 'local') title = 'Modo Local Activo (Sin Base de Datos)';
     if (status === 'offline') title = 'Sin Internet / Guardando cambios localmente';

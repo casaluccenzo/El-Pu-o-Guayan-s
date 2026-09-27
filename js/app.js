@@ -163,9 +163,58 @@ function sanitizeDataIntegrity(log) {
     });
 }
 
-// #header-offline-badge (sistema/index.html) is left dormant here --
-// display:none until Task 13 gives it a new PowerSync-status-driven updater.
-// Its old driver (the offline queue's item count) no longer exists.
+// Plan B, Task 13: #header-offline-badge's driver, replacing the offline
+// queue's item count (retired in Task 12) with PowerSyncManager's real
+// SyncStatus. Bound to db.registerListener's statusChanged event (see
+// js/powersync/client.js) -- not polled -- so it reflects connect/
+// disconnect/upload/download transitions the instant PowerSync reports them.
+async function updateSyncStatusUI(status) {
+    if (!status) return;
+    // No connect() attempted yet (pre-login, or PowerSync not configured at
+    // all) -- connected:false here doesn't mean "offline", it means "never
+    // tried". Stay quiet instead of flashing "Sin Conexión" on the login screen.
+    if (!window.PowerSyncManager || !window.PowerSyncManager.hasAttemptedConnect()) return;
+
+    // Once PowerSync has synced at least once, its own connected/disconnected
+    // signal is more accurate than the Supabase realtime channel's (that
+    // channel can stay SUBSCRIBED for a while after real connectivity drops).
+    if (status.hasSynced && window.UIManager && window.UIManager.updateConnectionStatus) {
+        window.UIManager.updateConnectionStatus(status.connected ? 'online' : 'offline', 'powersync');
+    }
+
+    const badge = document.getElementById('header-offline-badge');
+    const countSpan = document.getElementById('header-offline-count');
+    if (!badge || !countSpan) return;
+
+    if (!status.connected) {
+        badge.style.display = 'flex';
+        badge.style.background = 'rgba(239, 68, 68, 0.2)';
+        badge.style.borderColor = 'rgba(239, 68, 68, 0.5)';
+        badge.style.color = '#F87171';
+        countSpan.textContent = '⚡ Sin Conexión';
+        badge.title = 'Sin conexión con el servidor -- los cambios se guardan localmente';
+        return;
+    }
+
+    if (status.uploading || status.downloading) {
+        let pendingText = '⚡ Sincronizando…';
+        try {
+            const stats = window.PowerSyncManager && await window.PowerSyncManager.getUploadQueueStats();
+            if (stats && stats.count > 0) pendingText = `⚡ ${stats.count} pend.`;
+        } catch (e) { /* best-effort only -- badge still shows "Sincronizando…" */ }
+        badge.style.display = 'flex';
+        badge.style.background = 'rgba(245, 158, 11, 0.18)';
+        badge.style.borderColor = 'rgba(245, 158, 11, 0.5)';
+        badge.style.color = '#FBBF24';
+        countSpan.textContent = pendingText;
+        badge.title = 'Sincronizando cambios pendientes con el servidor';
+        return;
+    }
+
+    // Connected, nothing uploading/downloading -- fully caught up.
+    badge.style.display = 'none';
+}
+window.updateSyncStatusUI = updateSyncStatusUI;
 
 function initSelfHealingSentinel() {
     // Intercept unhandled errors & promise rejections to prevent crashing UI
@@ -4554,6 +4603,15 @@ document.addEventListener('DOMContentLoaded', () => {
 
     // Ticks the "Actualizado hace X" freshness label in Resumen
     setInterval(updateSyncFreshnessDisplay, 3000);
+
+    // 19. Bind the sync status badge to PowerSync's real status (Task 13).
+    // client.js is a deferred module script loaded before this one -- by
+    // DOMContentLoaded it has already run, so window.PowerSyncManager exists.
+    if (window.PowerSyncManager && window.PowerSyncManager.onStatusChange) {
+        window.PowerSyncManager.onStatusChange(updateSyncStatusUI);
+        const initialStatus = window.PowerSyncManager.getSyncStatus();
+        if (initialStatus) updateSyncStatusUI(initialStatus);
+    }
 
     initAdminDashboardListeners();
     initAgentListeners();

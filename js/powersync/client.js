@@ -26,6 +26,7 @@ const WORKER_PATH = '/js/powersync/vendor/@powersync/worker.js';
 
 let db = null;
 let connectPromise = null;
+let connectAttempted = false;
 
 function createDatabase() {
     if (db) return db;
@@ -60,6 +61,7 @@ function createDatabase() {
 // Llamado desde handleUserLogin (js/app.js) apenas hay sesion de Supabase --
 // fetchCredentials (connector.js) necesita esa sesion para el JWT.
 async function connect() {
+    connectAttempted = true;
     if (connectPromise) return connectPromise;
     const database = createDatabase();
     const ConnectorClass = window.PowerSyncConnector;
@@ -75,8 +77,32 @@ function getSyncStatus() {
     return db ? db.currentStatus : null;
 }
 
+// Plan B, Task 13 -- event-driven, not polled: db.registerListener's
+// statusChanged fires on every connect/disconnect/upload/download
+// transition (confirmed against @powersync/web's real .d.ts, not just the
+// docs). Returns the same disposer registerListener gives back, so a caller
+// can unsubscribe if it ever needs to.
+function onStatusChange(callback) {
+    return createDatabase().registerListener({ statusChanged: callback });
+}
+
+// Real pending-write count for the sync badge (Task 13) -- backed by
+// PowerSync's own CRUD upload queue, unlike the old offline queue's manual
+// localStorage count that Task 12 retired.
+function getUploadQueueStats() {
+    return createDatabase().getUploadQueueStats();
+}
+
 window.PowerSyncManager = {
     db: createDatabase(),
     connect,
-    getSyncStatus
+    getSyncStatus,
+    onStatusChange,
+    getUploadQueueStats,
+    // Task 13: before the first connect() attempt (pre-login, or a device
+    // that never got that far), currentStatus.connected is false the same
+    // way it would be if genuinely offline -- there is no third boolean to
+    // tell the two apart. The badge/dot need this to stay quiet instead of
+    // reading "Sin Conexión" on a bare login screen that never tried yet.
+    hasAttemptedConnect: () => connectAttempted
 };
