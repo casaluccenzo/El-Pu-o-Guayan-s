@@ -1554,10 +1554,52 @@ ejecutar, no asumirlo de una fecha de spec pasada).
   no. Mismo espíritu que los tests ya existentes de `aggregatePnl`/
   `estimateProductionCost`.
 
-- [ ] **Step 1-N:** un test por fórmula, casos borde incluidos (cierre sin
+- [x] **Step 1-N:** un test por fórmula, casos borde incluidos (cierre sin
       movimientos, producto nuevo sin historial, dos categorías cruzando el
       mismo cierre).
-- [ ] **Step final: Commit**
+
+  Nueva suite `runPlanBAggregationTests` en `tests/unit.test.js`, registrada
+  en `SUITES` justo después de `Analytics`. Leí las fórmulas reales antes de
+  escribir nada (migraciones `026_day_closes.sql`, `030_stock_recompute.sql`,
+  `033_promote_stock_computed.sql`, y `mapDebtRow`/`fetchDebts` en
+  `js/supabase.js`) en vez de asumir el resumen del plan — coincidía, pero
+  confirmado contra el SQL real, no de memoria.
+
+  Decisión de diseño: estas fórmulas no existen hoy como función JS
+  importable en ningún lado (el trigger vive solo en Postgres; el espejo de
+  pastelitos en `fetchProducts()` es un template string SQL, no una función
+  invocable). En vez de crear código de producción nuevo sin ningún caller
+  real solo para tener algo que testear, las tres funciones puras
+  (`recomputeStock`, `computeDebtBalance`/`computePaidByDebtUuid`,
+  `computeLastCloseAt`) viven *dentro* del archivo de test, documentadas
+  como el espejo de la fórmula real — su trabajo es atrapar una regresión
+  de fórmula rápido y sin DB; Task 16 (harness de convergencia) es quien
+  verifica que el trigger/SQL real siguen de acuerdo con esta.
+
+  15 aserciones nuevas, las 3 fórmulas cubiertas:
+  - `recomputeStock`: pastelitos (solo movimientos post-cierre, `initial_stock`
+    solo `type='load'`) vs. otras categorías (`stock` = histórico completo,
+    `initial_stock` = stock-al-cierre + cargas post-cierre); `max = GREATEST(...)`
+    sube pero nunca baja solo; spec R3 (venta deja stock negativo, sin floor);
+    cierre sin movimientos (pastelitos → 0, otras categorías retienen);
+    producto nuevo sin historial; dos categorías cruzando el mismo `t0` sin
+    filtrarse entre sí.
+  - `computeDebtBalance` / `computePaidByDebtUuid`: abonos parciales con
+    montos que en punto flotante crudo arrastran error (3× 10.10 sin
+    redondear da 30.299999999999997 — verificado que con `.toFixed(2)` da
+    30.30 exacto); abono mayor a la deuda restante clampea a 0; múltiples
+    deudas con abonos agrupados por `debt_uuid` sin cruzarse entre sí.
+  - `computeLastCloseAt`: `day_closes` vacío → `-Infinity` (nunca lanza,
+    compara correctamente contra cualquier timestamp real); múltiples
+    cierres recibidos desordenados convergen al `MAX(closed_at)` sin
+    importar el orden de llegada.
+
+- [x] **Step final: Commit**
+
+  `node tests/unit.test.js`: 15/15 aserciones nuevas verdes al primer
+  intento (además de toda la suite existente). `node tests/build.test.js`:
+  OK. `npm run lint`: 0 errores. Sin cambios a código de producción — no
+  requiere verificación en navegador.
 
 ---
 

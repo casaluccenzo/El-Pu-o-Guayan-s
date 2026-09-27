@@ -468,6 +468,160 @@ function runAnalyticsUnitTests() {
     console.log("✅ TEST PASSED: aggregatePnl sums >1000 rows exactly");
 }
 
+// Plan B, Task 15 -- pure-JS mirrors of the aggregation formulas that live
+// server-side (Postgres trigger `recompute_product_stock`, migrations
+// 030/033/026) or as a raw SQL string (fetchProducts' pastelitos-live-query,
+// js/supabase.js -- Task 9 follow-up). Neither of those is an importable JS
+// function: the trigger only runs inside Postgres, and the SQL template
+// string can't be unit tested without a real SQLite/PowerSync instance
+// (that's Task 16's convergence harness). This suite exists so the FORMULA
+// itself -- the thing that has to stay identical across three
+// implementations (Postgres trigger, the offline-reload SQL mirror, and
+// this test) -- has one fast, deterministic, DB-free place to catch a
+// regression. It intentionally is not wired into the app: production keeps
+// computing this in Postgres, exactly as Plan B intends.
+function runPlanBAggregationTests() {
+    // --- recomputeStock: mirrors recompute_product_stock() (030/033) ---
+    // last_close_at() = COALESCE(MAX(day_closes.closed_at), '-infinity') --
+    // mirrored here as -Infinity so "no closes yet" compares true for every
+    // real timestamp, exactly like the SQL does.
+    function recomputeStock(movements, category, lastCloseAtMs, currentMax) {
+        // stock_movements.delta is an integer column -- no float rounding needed here
+        // (unlike money amounts below).
+        const sum = (rows) => rows.reduce((s, m) => s + m.delta, 0);
+        const since = movements.filter(m => new Date(m.createdAt).getTime() > lastCloseAtMs);
+        let stock, initialStock;
+        if (category === 'pastelitos') {
+            stock = sum(since);
+            initialStock = sum(since.filter(m => m.type === 'load'));
+        } else {
+            const upToClose = movements.filter(m => new Date(m.createdAt).getTime() <= lastCloseAtMs);
+            stock = sum(movements);
+            initialStock = sum(upToClose) + sum(since.filter(m => m.type === 'load'));
+        }
+        return { stock, initialStock, max: Math.max(initialStock, currentMax || 0) };
+    }
+
+    const t0 = new Date('2026-09-20T04:00:00.000Z').getTime(); // last_close_at()
+    const before = (mins) => new Date(t0 - mins * 60000).toISOString();
+    const after = (mins) => new Date(t0 + mins * 60000).toISOString();
+
+    // Pastelitos: only movements strictly after the close count at all.
+    const pastelitoMoves = [
+        { delta: 20, type: 'load', createdAt: before(30) },  // ayer -- ignorado
+        { delta: 20, type: 'load', createdAt: after(10) },
+        { delta: -3, type: 'sale', createdAt: after(20) },
+        { delta: 1, type: 'sale_return', createdAt: after(21) }
+    ];
+    let r = recomputeStock(pastelitoMoves, 'pastelitos', t0, 0);
+    assert.strictEqual(r.stock, 18, "recomputeStock: pastelitos stock = Σ deltas post-cierre (20-3+1)");
+    assert.strictEqual(r.initialStock, 20, "recomputeStock: pastelitos initial_stock = Σ solo 'load' post-cierre");
+    assert.strictEqual(r.max, 20, "recomputeStock: max = GREATEST(initial_stock, max_actual) sube");
+    console.log("✅ TEST PASSED: recomputeStock (pastelitos) matches recompute_product_stock()'s formula");
+
+    // Otras categorías (bebidas/dulces/etc.): stock es historico completo;
+    // initial_stock = lo que había al cierre + lo cargado desde entonces.
+    const bebidaMoves = [
+        { delta: 60, type: 'load', createdAt: before(2000) },
+        { delta: -45, type: 'sale', createdAt: before(100) }, // quedan 15 al cierre
+        { delta: 12, type: 'load', createdAt: after(15) },
+        { delta: -4, type: 'sale', createdAt: after(30) }
+    ];
+    r = recomputeStock(bebidaMoves, 'bebidas', t0, 60);
+    assert.strictEqual(r.stock, 23, "recomputeStock: no-pastelitos stock = Σ TODO el historial (60-45+12-4)");
+    assert.strictEqual(r.initialStock, 27, "recomputeStock: no-pastelitos initial_stock = stock-al-cierre(15) + cargas post-cierre(12)");
+    assert.strictEqual(r.max, 60, "recomputeStock: max no baja si el max configurado ya era mayor");
+    console.log("✅ TEST PASSED: recomputeStock (no-pastelitos) matches recompute_product_stock()'s formula");
+
+    // Spec R3: una venta que deja stock negativo es legítima, sin floor a 0.
+    r = recomputeStock([{ delta: 5, type: 'load', createdAt: after(1) }, { delta: -50, type: 'sale', createdAt: after(2) }], 'bebidas', t0, 5);
+    assert.strictEqual(r.stock, -45, "recomputeStock (spec R3): stock negativo es legítimo, no se clampea a 0");
+    console.log("✅ TEST PASSED: recomputeStock allows negative stock (spec R3, no floor)");
+
+    // Cierre sin movimientos posteriores: pastelitos vuelve a 0 (se resetea
+    // con el día); las demás categorías retienen el stock previo tal cual.
+    r = recomputeStock(pastelitoMoves.slice(0, 1), 'pastelitos', t0, 20);
+    assert.strictEqual(r.stock, 0, "recomputeStock: pastelitos sin movimientos post-cierre da 0 (se resetea con el día)");
+    assert.strictEqual(r.initialStock, 0, "recomputeStock: idem para initial_stock");
+    r = recomputeStock([{ delta: 60, type: 'load', createdAt: before(2000) }, { delta: -45, type: 'sale', createdAt: before(100) }], 'bebidas', t0, 60);
+    assert.strictEqual(r.stock, 15, "recomputeStock: no-pastelitos sin movimientos post-cierre retiene el stock previo");
+    assert.strictEqual(r.initialStock, 15, "recomputeStock: idem para initial_stock (nada nuevo que sumarle)");
+    console.log("✅ TEST PASSED: recomputeStock handles a close with no movements since");
+
+    // Producto nuevo sin ningún historial de movimientos.
+    r = recomputeStock([], 'pastelitos', t0, 0);
+    assert.strictEqual(r.stock, 0, "recomputeStock: producto nuevo sin historial -> stock 0");
+    assert.strictEqual(r.initialStock, 0, "recomputeStock: producto nuevo sin historial -> initial_stock 0");
+    assert.strictEqual(r.max, 0, "recomputeStock: producto nuevo sin historial -> max 0");
+    console.log("✅ TEST PASSED: recomputeStock handles a brand-new product with no movement history");
+
+    // Cruce de categorías: un pastelito y una bebida pasan por el MISMO
+    // last_close_at() -- cada uno debe seguir su propia rama de la fórmula,
+    // sin que una filtre a la otra (misma frontera, dos resultados distintos).
+    const crossPastelito = recomputeStock(pastelitoMoves, 'pastelitos', t0, 0);
+    const crossBebida = recomputeStock(bebidaMoves, 'bebidas', t0, 60);
+    assert.strictEqual(crossPastelito.stock, 18, "recomputeStock: cruce de categorías -- el pastelito sigue dando 18");
+    assert.strictEqual(crossBebida.stock, 23, "recomputeStock: cruce de categorías -- la bebida sigue dando 23 con el mismo t0");
+    console.log("✅ TEST PASSED: recomputeStock keeps categories independent across the same day_closes boundary");
+
+    // --- computeDebtBalance / computePaidByDebtUuid: mirrors mapDebtRow +
+    // fetchDebts' paidByUuid grouping (js/supabase.js) ---
+    function computeDebtBalance(originalAmount, paidAmount) {
+        return Number(Math.max(0, originalAmount - paidAmount).toFixed(2));
+    }
+    function computePaidByDebtUuid(payments) {
+        const map = new Map();
+        for (const p of payments) map.set(p.debtUuid, Number(((map.get(p.debtUuid) || 0) + p.amount).toFixed(2)));
+        return map;
+    }
+
+    // Abonos parciales sucesivos, con montos que en punto flotante crudo
+    // arrastran error (10.10 + 10.10 + 10.10 = 30.299999999999997 sin redondeo).
+    let paid = computePaidByDebtUuid([
+        { debtUuid: 'd1', amount: 10.10 }, { debtUuid: 'd1', amount: 10.10 }, { debtUuid: 'd1', amount: 10.10 }
+    ]).get('d1');
+    assert.strictEqual(paid, 30.30, "computePaidByDebtUuid: abonos parciales sin arrastre de punto flotante");
+    assert.strictEqual(computeDebtBalance(100, paid), 69.70, "computeDebtBalance: saldo = original - Σ abonos, exacto");
+    console.log("✅ TEST PASSED: computeDebtBalance/computePaidByDebtUuid: multiple partial payments, no float drift");
+
+    // Abono mayor a la deuda restante -> clamp a 0, nunca negativo.
+    assert.strictEqual(computeDebtBalance(50, 80), 0, "computeDebtBalance: abono mayor a la deuda restante clampea a 0");
+    console.log("✅ TEST PASSED: computeDebtBalance clamps an overpayment to 0");
+
+    // Múltiples deudas con abonos agrupados por debt_uuid -- un abono a d2
+    // no debe tocar el saldo de d1.
+    const multiPaid = computePaidByDebtUuid([
+        { debtUuid: 'd1', amount: 20 }, { debtUuid: 'd2', amount: 5 }, { debtUuid: 'd1', amount: 15 }
+    ]);
+    assert.strictEqual(computeDebtBalance(100, multiPaid.get('d1') || 0), 65, "computeDebtBalance: deuda d1 solo ve sus propios abonos (35 de 100)");
+    assert.strictEqual(computeDebtBalance(10, multiPaid.get('d2') || 0), 5, "computeDebtBalance: deuda d2 solo ve sus propios abonos (5 de 10)");
+    assert.strictEqual(computeDebtBalance(30, multiPaid.get('d3') || 0), 30, "computeDebtBalance: una deuda sin ningún abono queda en su monto original");
+    console.log("✅ TEST PASSED: multiple debts keep independent balances grouped by debt_uuid");
+
+    // --- computeLastCloseAt: mirrors last_close_at() (migration 026) ---
+    function computeLastCloseAt(dayCloses) {
+        if (!dayCloses || dayCloses.length === 0) return -Infinity;
+        return Math.max(...dayCloses.map(d => new Date(d.closedAt).getTime()));
+    }
+
+    // Sin cierres previos -> -Infinity (equivalente a COALESCE(...,'-infinity')),
+    // sin arrojar error -- y sigue comparando correctamente contra cualquier
+    // timestamp real (todo movimiento cuenta como "post-cierre").
+    assert.strictEqual(computeLastCloseAt([]), -Infinity, "computeLastCloseAt: day_closes vacío -> -Infinity, no null ni error");
+    assert.ok(new Date('2020-01-01').getTime() > computeLastCloseAt([]), "computeLastCloseAt: -Infinity sigue comparando bien contra timestamps reales");
+
+    // Múltiples cierres, incluso recibidos desordenados/tardíos (el orden de
+    // inserción no debe importar) -> converge siempre al más reciente.
+    const outOfOrderCloses = [
+        { closedAt: '2026-09-15T04:00:00.000Z' },
+        { closedAt: '2026-09-20T04:00:00.000Z' }, // el más reciente, llega en el medio
+        { closedAt: '2026-09-10T04:00:00.000Z' }  // el más viejo, llega último
+    ];
+    assert.strictEqual(computeLastCloseAt(outOfOrderCloses), new Date('2026-09-20T04:00:00.000Z').getTime(),
+        "computeLastCloseAt: converge al MAX(closed_at) sin importar el orden de llegada");
+    console.log("✅ TEST PASSED: computeLastCloseAt = MAX(closed_at), empty -> -Infinity, order-independent");
+}
+
 // Security Regression Test: Reject all legacy credentials
 async function verifyLegacyLoginRejections() {
     const legacyPasses = ['070821', 'Lucenzo2026!', '1111', 'Ventas2026!', '2222', 'Cocina2026!'];
@@ -576,6 +730,7 @@ async function verifyTelegramBot() {
 const SUITES = [
     ['Core', runCoreUnitTests],
     ['Analytics', runAnalyticsUnitTests],
+    ['Plan B aggregation formulas', runPlanBAggregationTests],
     ['Legacy credentials', verifyLegacyLoginRejections],
     ['WhatsApp bot', verifyWhatsAppBot],
     ['Telegram bot', verifyTelegramBot]
