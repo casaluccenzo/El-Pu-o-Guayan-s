@@ -404,15 +404,36 @@ ejecutar, no asumirlo de una fecha de spec pasada).
   libreria ("Caught error"), no afecta el INSERT/SELECT real. Ver el
   comentario en `client.js` si reaparece.
 
-- [x] **Step 4: Prueba manual — dev**
+- [x] **Step 4: Prueba manual — dev — verificado de punta a punta**
 
-  Verificado contra el dev server local (no aun contra `casa-lucenzo-dev`
-  con datos reales, eso es cuando se conecte de verdad con Task 4): la
-  pagina carga sin romperse, `window.PowerSyncManager.db` se instancia,
-  `db.init()` corre limpio, y un `INSERT`/`SELECT` de prueba contra la
-  tabla local `products` funciona. Pendiente para cuando haya Tasks 4+:
-  probar con el seed real de `casa-lucenzo-dev` y confirmar que un INSERT
-  local efectivamente sincroniza a Postgres dev (necesita login real).
+  Login real contra `casa-lucenzo-dev` con un usuario de prueba
+  (`test@casalucenzo.com`, creado por Gustavo vía dashboard). Encontrados y
+  corregidos 2 problemas reales que solo aparecen con datos/auth reales
+  (ninguno de los dos era detectable con el test aislado de antes):
+
+  1. **`sync.worker` faltante.** `database.worker` (ya seteado) resuelve el
+     adaptador SQL; el mecanismo de sync/upload-queue
+     (`@powersync/shared-internals`, el mismo "Caught error... cleanup
+     triggers" que se había marcado como cosmético) usa una opción
+     SEPARADA, `sync.worker`, con el mismo problema de origen cruzado. Sin
+     ella, `connect()` resolvía sin tirar error pero nunca conectaba de
+     verdad (`currentStatus.connected` quedaba en `false` para siempre, cero
+     requests de red). Con `sync: { worker: WORKER_PATH }` agregado, conecta
+     bien -- **la nota anterior de "cosmético" en `client.js` estaba mal**,
+     ya corregida.
+  2. **JWKS vs JWT secret legacy.** El JWT secret legacy que se pegó en
+     Client Auth (Task 1) era para el alias `anon`; las sesiones de
+     usuario real (`signInWithPassword`) vienen firmadas con las claves
+     asimétricas nuevas de Supabase (`alg: ES256`, con `kid`) -- PowerSync
+     rechazaba el token con `401 PSYNC_S2101` ("no key matched the token
+     KID"). Se resolvió configurando JWKS en el dashboard de PowerSync.
+
+  Con ambos arreglados: `connect()` conecta de verdad, los 11 streams
+  quedan `has_synced: true`, los datos reales del seed de Plan A
+  (`seed-past-a`, etc.) aparecen en las tablas locales, y un
+  `INSERT`/`DELETE` de prueba en `ingredients` desde el navegador
+  confirmó llegar y borrarse en Postgres dev real (verificado con
+  `execute_sql` contra `casa-lucenzo-dev`, no asumido).
 
 - [x] **Step 5: Commit**
 
@@ -462,13 +483,20 @@ ejecutar, no asumirlo de una fecha de spec pasada).
   paralelo al `id` local (ya resuelto desde el schema de Task 3), así que
   el código existente que lee `.uuid` sigue funcionando sin cambios.
 
-- [~] **Step 2: Test manual por función — parcial**
+- [x] **Step 2: Test manual por función — verificado con datos reales**
 
-  Verificado el camino de fallback a Supabase (pre-login, sin cambios) en
-  el dev server local. **Falta** probarlo contra `casa-lucenzo-dev` con un
-  login real y datos sincronizados de verdad (necesita credenciales de un
-  usuario de prueba en ese proyecto, que este agente no tiene) -- pendiente
-  para cuando Gustavo pueda loguearse con un build de esta rama.
+  Con el login real de Task 3 Step 4: las 7 funciones devuelven datos del
+  seed real de `casa-lucenzo-dev` con la forma esperada -- `price`/`cost`/
+  `bcv_rate`/`amount` como `number` (no el string que da SQLite),
+  `use_auto_bcv`/`totp_enabled` como `boolean` (no `0`/`1`), `productId`/
+  `clientName` presentes. Encontrada de paso otra correccion real de
+  schema, no solo de este Step: PowerSync mapea TODAS las columnas
+  `numeric` de Postgres a `column.text` (no `column.real` como se habia
+  puesto en Task 3) -- confirmado contra el generador oficial de schema
+  del dashboard de PowerSync (introspecciona la publication real), no
+  adivinado. `real` de SQLite es punto flotante y puede redondear mal un
+  monto de dinero; `text` conserva el valor exacto. `js/powersync/schema.js`
+  y los mappers de esta task ya corregidos y verificados juntos.
 
 - [x] **Step 3: Commit**
 

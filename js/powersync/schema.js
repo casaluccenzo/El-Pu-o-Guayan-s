@@ -15,7 +15,17 @@
 //   boolean       -> integer (0/1)
 //   timestamptz   -> text (ISO 8601, como lo manda Postgres/PostgREST)
 //   uuid          -> text
-//   numeric       -> real
+//   integer       -> integer
+//   numeric       -> TEXT, no real -- confirmado contra el generador oficial
+//     de PowerSync (Client SDK Setup del dashboard, que introspecciona la
+//     publication real): usa column.text para todo lo que en Postgres es
+//     `numeric`, nunca column.real. `numeric` es precision exacta (plata);
+//     `real` de SQLite es punto flotante (double) y puede redondear mal
+//     (ej. 19.99 -> 19.989999999999998). El texto conserva el valor exacto;
+//     Tasks 4-9 convierten a Number() en JS solo al hacer aritmetica, no al
+//     guardar. Afecta: products.price/cost, sales.price/bcv_rate/
+//     cost_at_sale, expenses.amount/bcv_rate, debts.amount,
+//     debt_payments.amount, ingredients.stock, app_config.bcv_rate.
 //   jsonb         -> text (JSON.stringify/parse del lado de la app)
 import { column, Schema, Table } from '@powersync/web';
 
@@ -26,11 +36,11 @@ const products = new Table(
         min: column.integer,
         max: column.integer,
         unit: column.text,
-        price: column.real,
+        price: column.text,
         category: column.text,
         updated_at: column.text,
         initial_stock: column.integer,
-        cost: column.real,
+        cost: column.text,
         location_id: column.text,
         // Columnas sombra (migracion 029). Plan A las mantiene siempre
         // iguales a las reales desde la migracion 033 (Task 2) -- dejarlas
@@ -44,7 +54,7 @@ const products = new Table(
 
 const ingredients = new Table({
     name: column.text,
-    stock: column.real,
+    stock: column.text,
     unit: column.text,
     updated_at: column.text,
     location_id: column.text
@@ -66,7 +76,7 @@ const profiles = new Table({
 });
 
 const app_config = new Table({
-    bcv_rate: column.real,
+    bcv_rate: column.text,
     use_auto_bcv: column.integer,
     updated_at: column.text,
     totp_secret: column.text,
@@ -83,10 +93,10 @@ const sales = new Table(
         uuid: column.text,
         product_id: column.text,
         name: column.text,
-        price: column.real,
+        price: column.text,
         timestamp: column.text,
-        bcv_rate: column.real,
-        cost_at_sale: column.real,
+        bcv_rate: column.text,
+        cost_at_sale: column.text,
         // Anulacion (migracion 028, spec §5.2) -- NULL = venta activa.
         voided_at: column.text,
         void_reason: column.text,
@@ -99,11 +109,11 @@ const expenses = new Table(
     {
         uuid: column.text,
         description: column.text,
-        amount: column.real,
+        amount: column.text,
         timestamp: column.text,
         category: column.text,
         currency: column.text,
-        bcv_rate: column.real,
+        bcv_rate: column.text,
         location_id: column.text
     },
     { indexes: { timestamp: ['timestamp'] } }
@@ -112,7 +122,7 @@ const expenses = new Table(
 const debts = new Table({
     uuid: column.text,
     client_name: column.text,
-    amount: column.real,
+    amount: column.text,
     description: column.text,
     timestamp: column.text,
     location_id: column.text
@@ -152,7 +162,7 @@ const stock_movements = new Table(
 const debt_payments = new Table(
     {
         debt_uuid: column.text,
-        amount: column.real,
+        amount: column.text,
         method: column.text,
         device_id: column.text,
         created_at: column.text,

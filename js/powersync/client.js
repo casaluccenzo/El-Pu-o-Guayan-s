@@ -34,18 +34,25 @@ function createDatabase() {
         database: {
             dbFilename: 'casalucenzo.db',
             worker: WORKER_PATH
+        },
+        // Segunda opcion de worker, separada de database.worker: la que usa
+        // el mecanismo de sync/upload-queue (@powersync/shared-internals,
+        // triggers de CDC), no el adaptador SQL. Sin esto, connect() resuelve
+        // sin tirar error pero NUNCA llega a conectar de verdad -- currentStatus
+        // se queda en {connected:false, connecting:false} para siempre y no
+        // sale ni un solo request de red al endpoint de PowerSync. Encontrado
+        // recien al probar login real contra casa-lucenzo-dev, no algo que la
+        // doc explique.
+        sync: {
+            worker: WORKER_PATH
         }
     });
     // Nota (verificado en navegador real): al arrancar aparece en consola un
     // "[PowerSync]: Caught error while attempting to cleanup triggers
-    // SecurityError: ... worker.js cannot be accessed from origin ..." que
-    // sigue apuntando al CDN en vez de WORKER_PATH. Es una rutina interna de
-    // @powersync/shared-internals separada de la conexion principal (no usa
-    // este mismo objeto de opciones) -- el propio mensaje dice "Caught error",
-    // o sea que ya viene atajado. Probado explicitamente: INSERT/SELECT
-    // reales contra window.PowerSyncManager.db funcionan bien a pesar de este
-    // log. Cosmetico, no bloqueante -- si en el futuro aparece un mensaje
-    // parecido pero SIN "Caught", ahi si investigar en serio.
+    // SecurityError: ..." la PRIMERA vez que corre, antes de que sync.worker
+    // (arriba) quede realmente aplicado -- es el mismo intento fallido que
+    // bloqueaba connect(). Con sync.worker seteado debería dejar de aparecer;
+    // si vuelve a aparecer Y connect() sigue sin conectar, investigar en serio.
     db.init().catch(e => console.error('PowerSync db.init() failed:', e));
     return db;
 }

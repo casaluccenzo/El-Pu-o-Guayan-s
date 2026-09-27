@@ -349,6 +349,16 @@ function getLocalDb() {
     return manager.db;
 }
 
+// Postgres `numeric` columns are stored as SQLite TEXT locally (see
+// js/powersync/schema.js -- confirmed against PowerSync's own schema
+// generator: numeric -> text, never real, to avoid float rounding on money).
+// Supabase-direct already returns real numbers via PostgREST's JSON encoding,
+// so this is a no-op there -- applied unconditionally so both branches share
+// one mapper instead of duplicating the coercion per source.
+function toNum(v) {
+    return (v === null || v === undefined) ? v : Number(v);
+}
+
 // `initial_stock` is the day's load baseline and 0 is a legitimate value
 // (nothing loaded yet). Substituting `stock` for a missing value used to also
 // fire on a real 0, silently rewriting the baseline on every background sync
@@ -356,8 +366,22 @@ function getLocalDb() {
 function mapProductRow(p) {
     return {
         ...p,
+        price: toNum(p.price),
+        cost: toNum(p.cost),
         initial_stock: (p.initial_stock !== null && p.initial_stock !== undefined) ? p.initial_stock : p.stock
     };
+}
+
+function mapSaleRow(s) {
+    return { ...s, productId: s.product_id, price: toNum(s.price), bcv_rate: toNum(s.bcv_rate), cost_at_sale: toNum(s.cost_at_sale) };
+}
+
+function mapExpenseRow(e) {
+    return { ...e, amount: toNum(e.amount), bcv_rate: toNum(e.bcv_rate) };
+}
+
+function mapDebtRow(d) {
+    return { ...d, clientName: d.client_name, amount: toNum(d.amount) };
 }
 
 async function fetchProducts() {
@@ -396,7 +420,7 @@ async function fetchSales() {
                 'SELECT * FROM sales WHERE timestamp >= ? ORDER BY timestamp ASC, uuid ASC',
                 [currentSalesExpensesFilterTime()]
             );
-            return rows.map(s => ({ ...s, productId: s.product_id }));
+            return rows.map(mapSaleRow);
         } catch (e) {
             console.error("Error fetching sales from PowerSync local DB:", e);
             return null;
@@ -418,7 +442,7 @@ async function fetchSales() {
             .order('timestamp', { ascending: true })
             .order('uuid', { ascending: true })
             .range(offset, offset + POSTGREST_PAGE_SIZE - 1));
-        return rows.map(s => ({ ...s, productId: s.product_id }));
+        return rows.map(mapSaleRow);
     } catch (e) {
         console.error("Error fetching sales from Supabase:", e);
         return null;
@@ -429,10 +453,11 @@ async function fetchExpenses() {
     const localDb = getLocalDb();
     if (localDb) {
         try {
-            return await localDb.getAll(
+            const rows = await localDb.getAll(
                 'SELECT * FROM expenses WHERE timestamp >= ? ORDER BY timestamp ASC, uuid ASC',
                 [currentSalesExpensesFilterTime()]
             );
+            return rows.map(mapExpenseRow);
         } catch (e) {
             console.error("Error fetching expenses from PowerSync local DB:", e);
             return null;
@@ -441,11 +466,12 @@ async function fetchExpenses() {
     if (!client) return null;
     try {
         // Paged for the same reason as fetchSales above.
-        return await fetchAllPages(offset => client.from('expenses').select('*')
+        const rows = await fetchAllPages(offset => client.from('expenses').select('*')
             .gte('timestamp', currentSalesExpensesFilterTime())
             .order('timestamp', { ascending: true })
             .order('uuid', { ascending: true })
             .range(offset, offset + POSTGREST_PAGE_SIZE - 1));
+        return rows.map(mapExpenseRow);
     } catch (e) {
         console.error("Error fetching expenses from Supabase:", e);
         return null;
@@ -457,7 +483,7 @@ async function fetchDebts() {
     if (localDb) {
         try {
             const rows = await localDb.getAll('SELECT * FROM debts ORDER BY timestamp DESC');
-            return rows.map(d => ({ ...d, clientName: d.client_name }));
+            return rows.map(mapDebtRow);
         } catch (e) {
             console.error("Error fetching debts from PowerSync local DB:", e);
             return null;
@@ -467,7 +493,7 @@ async function fetchDebts() {
     try {
         const { data, error } = await client.from('debts').select('*').order('timestamp', { ascending: false });
         if (error) throw error;
-        return data.map(d => ({ ...d, clientName: d.client_name }));
+        return data.map(mapDebtRow);
     } catch (e) {
         console.error("Error fetching debts from Supabase:", e);
         return null;
@@ -496,11 +522,16 @@ async function fetchReplenishments() {
     }
 }
 
+function mapIngredientRow(i) {
+    return { ...i, stock: toNum(i.stock) };
+}
+
 async function fetchIngredients() {
     const localDb = getLocalDb();
     if (localDb) {
         try {
-            return await localDb.getAll('SELECT * FROM ingredients ORDER BY name');
+            const rows = await localDb.getAll('SELECT * FROM ingredients ORDER BY name');
+            return rows.map(mapIngredientRow);
         } catch (e) {
             console.error("Error fetching ingredients from PowerSync local DB:", e);
             return null;
@@ -510,7 +541,7 @@ async function fetchIngredients() {
     try {
         const { data, error } = await client.from('ingredients').select('*').order('name');
         if (error) throw error;
-        return data;
+        return data.map(mapIngredientRow);
     } catch (e) {
         console.error("Error fetching ingredients from Supabase:", e);
         return null;
@@ -1174,7 +1205,8 @@ function mapAppConfigRow(data) {
     return {
         ...data,
         use_auto_bcv: !!data.use_auto_bcv,
-        totp_enabled: !!data.totp_enabled
+        totp_enabled: !!data.totp_enabled,
+        bcv_rate: toNum(data.bcv_rate)
     };
 }
 
