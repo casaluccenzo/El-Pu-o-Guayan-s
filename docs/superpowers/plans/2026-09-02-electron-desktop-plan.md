@@ -1,5 +1,9 @@
 # Casa Lucenzo Electron Desktop — Implementation Plan
 
+> **Estado (revisado 2026-09-27): Tasks 1–8 implementadas; Task 9 a medias.**
+> Está en el código: `desktop/` (`main.js` con protocolo `app://`, `preload.js`, `updater.js`, `menu.js`, `build/icon.png`, `.env.example`), `scripts/inject-version.js` + `tests/build.test.js`, `js/desktop.js`, footer y diálogo "Acerca de", scripts `release*` y el runbook. Cambio respecto al plan: la config de electron-builder vive en `desktop/electron-builder.config.js` + `desktop/brand-config.js` (por marca), no en un bloque `build` de `desktop/package.json`.
+> Task 9: se mergeó (#19) y hubo releases `v1.0.1`–`v1.0.4`; El Puño publica desde este repo vía `.github/workflows/release-desktop.yml`. **Pendiente de verdad:** registrar la instalación en las PC de la tienda y la prueba del ciclo de auto-update, y anotar el resultado en `electron-release-runbook.md` (Steps 3–6).
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** Empaquetar el POS de Casa Lucenzo como una app de escritorio Windows
@@ -85,7 +89,7 @@ al array `SCRIPTS` de `sw.js` (skill `verifying-production-deploys`).
   exporta nada; es un entrypoint. La ventana por ahora carga un `data:` HTML de
   prueba.
 
-- [ ] **Step 1: Crear `desktop/package.json`**
+- [x] **Step 1: Crear `desktop/package.json`**
 
 ```json
 {
@@ -109,12 +113,12 @@ al array `SCRIPTS` de `sw.js` (skill `verifying-production-deploys`).
 }
 ```
 
-- [ ] **Step 2: Instalar**
+- [x] **Step 2: Instalar**
 
 Run: `cd desktop && npm install`
 Expected: instala sin errores. `desktop/node_modules/` creado.
 
-- [ ] **Step 3: `.gitignore` (raíz) — agregar**
+- [x] **Step 3: `.gitignore` (raíz) — agregar**
 
 ```
 desktop/node_modules/
@@ -122,7 +126,7 @@ desktop/dist/
 .env
 ```
 
-- [ ] **Step 4: `desktop/.gitignore`**
+- [x] **Step 4: `desktop/.gitignore`**
 
 ```
 node_modules/
@@ -130,7 +134,7 @@ dist/
 .env
 ```
 
-- [ ] **Step 5: `desktop/main.js` mínimo**
+- [x] **Step 5: `desktop/main.js` mínimo**
 
 ```javascript
 const { app, BrowserWindow } = require('electron');
@@ -159,13 +163,13 @@ if (!app.requestSingleInstanceLock()) {
 }
 ```
 
-- [ ] **Step 6: Correr**
+- [x] **Step 6: Correr**
 
 Run: `cd desktop && npm start`
 Expected: se abre una ventana maximizada que dice "Casa Lucenzo — scaffold OK".
 Cerrarla termina el proceso.
 
-- [ ] **Step 7: Commit**
+- [x] **Step 7: Commit**
 
 ```bash
 git add desktop/package.json desktop/main.js desktop/.gitignore .gitignore
@@ -185,12 +189,12 @@ git commit -m "feat(desktop): Electron scaffold + blank window"
   (`/js/*`, `/css/*`, `/img/*`) resolviendo bien. En dev, `www/` está en
   `<repo>/www`; empaquetado, en `process.resourcesPath + '/www'`.
 
-- [ ] **Step 1: Generar `www/` una vez**
+- [x] **Step 1: Generar `www/` una vez**
 
 Run (desde la raíz): `npm run build`
 Expected: `www/sistema/index.html` existe.
 
-- [ ] **Step 2: Reescribir `desktop/main.js` con el protocolo**
+- [x] **Step 2: Reescribir `desktop/main.js` con el protocolo**
 
 ```javascript
 const { app, BrowserWindow, protocol, net } = require('electron');
@@ -247,7 +251,7 @@ if (!app.requestSingleInstanceLock()) {
 }
 ```
 
-- [ ] **Step 3: Correr y verificar la carga**
+- [x] **Step 3: Correr y verificar la carga**
 
 Run: `cd desktop && npm start`
 Expected: se ve la **pantalla de login del POS** (no un 404, no una página en
@@ -255,7 +259,7 @@ blanco). Abrir DevTools (`Ctrl+Shift+I`) → pestaña Console → **no debe habe
 errores 404 de `/js/*.js` ni `/css/*`**. La pestaña Network muestra
 `app://js/app.js` etc. con status 200.
 
-- [ ] **Step 4: Verificar que Supabase responde desde `app://`**
+- [x] **Step 4: Verificar que Supabase responde desde `app://`**
 
 En la ventana del POS, intentar hacer login con un usuario real
 (email/contraseña). Expected: el login llega a Supabase y entra (o da "clave
@@ -263,7 +267,7 @@ incorrecta" — cualquier respuesta real sirve). En la Console **no debe haber
 errores de CORS**. Si los hay: anotar el error exacto y parar — el fix
 (header handler en `session.webRequest`) se decide con el error en mano.
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add desktop/main.js
@@ -288,7 +292,7 @@ git commit -m "feat(desktop): app:// protocol serving www/, loads the POS"
   Task 4 conecta los 3 últimos al updater real; acá son stubs que devuelven
   `'desconocido'` / no-op, salvo `getVersion`.
 
-- [ ] **Step 1: `desktop/preload.js`**
+- [x] **Step 1: `desktop/preload.js`**
 
 ```javascript
 const { contextBridge, ipcRenderer } = require('electron');
@@ -310,7 +314,7 @@ contextBridge.exposeInMainWorld('electronAPI', {
 });
 ```
 
-- [ ] **Step 2: En `desktop/main.js`, registrar el preload y el handler de versión**
+- [x] **Step 2: En `desktop/main.js`, registrar el preload y el handler de versión**
 
 Agregar el `require` arriba:
 ```javascript
@@ -327,7 +331,7 @@ ipcMain.on('update:check', () => {});    // Task 4
 ipcMain.on('update:restart', () => {});  // Task 4
 ```
 
-- [ ] **Step 3: Verificar**
+- [x] **Step 3: Verificar**
 
 Run: `cd desktop && npm start` → DevTools Console:
 ```javascript
@@ -337,7 +341,7 @@ window.electronAPI.getUpdateStatus() // => "desconocido"
 Expected: los valores de arriba. `window.electronAPI` NO tiene otras
 propiedades (ni `ipcRenderer`, ni `require`).
 
-- [ ] **Step 4: Commit**
+- [x] **Step 4: Commit**
 
 ```bash
 git add desktop/preload.js desktop/main.js
@@ -362,7 +366,7 @@ git commit -m "feat(desktop): preload bridge — window.electronAPI (getVersion)
   `autoUpdater.checkForUpdates()` y `update:restart` a
   `autoUpdater.quitAndInstall()`.
 
-- [ ] **Step 1: `desktop/updater.js`**
+- [x] **Step 1: `desktop/updater.js`**
 
 ```javascript
 const { app, ipcMain } = require('electron');
@@ -400,7 +404,7 @@ function initUpdater(win) {
 module.exports = { initUpdater };
 ```
 
-- [ ] **Step 2: En `desktop/main.js`**
+- [x] **Step 2: En `desktop/main.js`**
 
 Quitar los stubs `ipcMain.on('update:check'...)` / `update:restart` del Task 3.
 Agregar arriba: `const { initUpdater } = require('./updater');`
@@ -409,7 +413,7 @@ Después de `win.once('ready-to-show', ...)`:
 initUpdater(win);
 ```
 
-- [ ] **Step 3: Verificar (sin release publicada todavía)**
+- [x] **Step 3: Verificar (sin release publicada todavía)**
 
 Run: `cd desktop && npm start`.
 Expected: la app abre normal. En dev `app.isPackaged` es false → no se dispara
@@ -420,7 +424,7 @@ window.electronAPI.checkForUpdates()
 No crashea. El status puede quedar `error` (no hay feed configurado / no
 empaquetado) — es esperado en dev. Lo que importa: **la app no se rompe**.
 
-- [ ] **Step 4: Commit**
+- [x] **Step 4: Commit**
 
 ```bash
 git add desktop/updater.js desktop/main.js
@@ -442,12 +446,12 @@ git commit -m "feat(desktop): electron-updater wiring (status + check + restart)
   - `const APP_VERSION = '__APP_VERSION__'` ya cubierto por lo anterior en `sw.js`
   `build.js` la llama después de copiar. `package.json.version` sube a `1.0.0`.
 
-- [ ] **Step 1: `package.json` — versión y campo**
+- [x] **Step 1: `package.json` — versión y campo**
 
 Cambiar `"version": "1.0.0"` (ya está en 1.0.0 — confirmar). Agregar más
 adelante los scripts (Task 8); acá solo la versión.
 
-- [ ] **Step 2: `sw.js` — usar el token**
+- [x] **Step 2: `sw.js` — usar el token**
 
 Reemplazar la línea 8:
 ```javascript
@@ -459,12 +463,12 @@ const APP_VERSION = '__APP_VERSION__';
 ```
 (El resto de `sw.js` usa la constante, no se toca.)
 
-- [ ] **Step 3: `sistema/index.html` — los `?v=`**
+- [x] **Step 3: `sistema/index.html` — los `?v=`**
 
 Reemplazar los 17 `?v=320` por `?v=__APP_VERSION__` (en el link de `main.css` y
 en cada `<script src>`). El footer y el diálogo son Task 6.
 
-- [ ] **Step 4: Escribir el test (falla)**
+- [x] **Step 4: Escribir el test (falla)**
 
 `tests/build.test.js`:
 ```javascript
@@ -494,7 +498,7 @@ console.log('build.test.js: OK');
 Run: `node tests/build.test.js`
 Expected: FAIL — `Cannot find module '../scripts/inject-version'`.
 
-- [ ] **Step 5: `scripts/inject-version.js`**
+- [x] **Step 5: `scripts/inject-version.js`**
 
 ```javascript
 const fs = require('node:fs');
@@ -523,7 +527,7 @@ module.exports = { injectVersion };
 Run: `node tests/build.test.js`
 Expected: `build.test.js: OK`.
 
-- [ ] **Step 6: Enganchar en `build.js`**
+- [x] **Step 6: Enganchar en `build.js`**
 
 En `scripts/build.js`, después del bloque que copia assets a `www/` y antes de
 la inyección de env vars (o después, no importa), agregar:
@@ -534,7 +538,7 @@ injectVersion(destDir, appVersion);
 console.log(`🏷️  Versión ${appVersion} inyectada en www/`);
 ```
 
-- [ ] **Step 7: Verificar el build entero**
+- [x] **Step 7: Verificar el build entero**
 
 Run: `npm run build`
 Then:
@@ -546,7 +550,7 @@ grep -m1 "APP_VERSION" www/sw.js
 Expected: primer grep sin resultados (exit 1). Segundo sin resultados (exit 1).
 Tercero: `const APP_VERSION = '1.0.0';`.
 
-- [ ] **Step 8: Agregar al test runner**
+- [x] **Step 8: Agregar al test runner**
 
 En `package.json`, `"test"` corre `tests/unit.test.js`. Agregar `tests/build.test.js`:
 ```json
@@ -556,7 +560,7 @@ En `package.json`, `"test"` corre `tests/unit.test.js`. Agregar `tests/build.tes
 Run: `npm test`
 Expected: los dos pasan.
 
-- [ ] **Step 9: Commit**
+- [x] **Step 9: Commit**
 
 ```bash
 git add scripts/inject-version.js scripts/build.js tests/build.test.js package.json sw.js sistema/index.html
@@ -581,7 +585,7 @@ git commit -m "feat(build): single version source — inject package.json versio
     muestra el cursor pointer).
   - Service worker registrado SOLO si `!window.electronAPI`.
 
-- [ ] **Step 1: `sistema/index.html` — footer**
+- [x] **Step 1: `sistema/index.html` — footer**
 
 En el `<footer class="app-footer">` (línea ~549), después del bloque "HECHO EN
 VENEZUELA", agregar:
@@ -591,7 +595,7 @@ VENEZUELA", agregar:
 </div>
 ```
 
-- [ ] **Step 2: `sistema/index.html` — diálogo "Acerca de"**
+- [x] **Step 2: `sistema/index.html` — diálogo "Acerca de"**
 
 Antes de `</body>` (o junto a los otros modales), agregar:
 ```html
@@ -620,20 +624,20 @@ Antes de `</body>` (o junto a los otros modales), agregar:
 (Usar las clases de modal que ya existen en el proyecto — revisar otro modal
 para los nombres exactos de `btn-primary`/`btn-secondary`/`modal-overlay`.)
 
-- [ ] **Step 3: `sistema/index.html` — cargar `js/desktop.js`**
+- [x] **Step 3: `sistema/index.html` — cargar `js/desktop.js`**
 
 Junto a los otros `<script src>` (después de `app.js`), agregar:
 ```html
 <script src="/js/desktop.js?v=__APP_VERSION__"></script>
 ```
 
-- [ ] **Step 4: `sw.js` — agregar `desktop.js` al precache**
+- [x] **Step 4: `sw.js` — agregar `desktop.js` al precache**
 
 En el array de scripts de `sw.js` (línea ~10-28), agregar `'desktop.js'` en la
 posición correspondiente (después de `app.js`), respetando el orden de
 `sistema/index.html`.
 
-- [ ] **Step 5: `js/desktop.js`**
+- [x] **Step 5: `js/desktop.js`**
 
 ```javascript
 // Cableado del shell de escritorio. No-op en un navegador normal.
@@ -682,7 +686,7 @@ posición correspondiente (después de `app.js`), respetando el orden de
 })();
 ```
 
-- [ ] **Step 6: `js/app.js` — guard del service worker**
+- [x] **Step 6: `js/app.js` — guard del service worker**
 
 Localizar el bloque de registro (línea ~3900-3910):
 ```javascript
@@ -699,7 +703,7 @@ Si están dispersos, la forma mínima segura: al inicio de cada bloque relaciona
 al SW, `if (window.electronAPI) return;` (o no ejecutar). Confirmar leyendo el
 contexto de cada una de las 3 ubicaciones.
 
-- [ ] **Step 7: Verificar en navegador**
+- [x] **Step 7: Verificar en navegador**
 
 Run: `npm run build` → servir `www/` (`npx serve www` o el devserver apuntado a
 www).
@@ -707,7 +711,7 @@ Expected: footer muestra `v1.0.0`. DevTools → Application → Service Workers:
 **el SW se registra** (estamos en navegador). Click en `v1.0.0`: no pasa nada
 visible (no hay `electronAPI`) — aceptable.
 
-- [ ] **Step 8: Verificar en Electron**
+- [x] **Step 8: Verificar en Electron**
 
 Run: `cd desktop && npm start` (tras `npm run build` en la raíz).
 Expected: footer `v1.0.0`. DevTools → Application → Service Workers: **NO hay
@@ -715,13 +719,13 @@ SW registrado**. Click en `v1.0.0`: abre el diálogo "Acerca de" con la versión
 un estado de update (probablemente "⚠ No se pudo verificar" en dev — ok). El
 botón "Cerrar" lo cierra.
 
-- [ ] **Step 9: `npm test` + `npm run lint`**
+- [x] **Step 9: `npm test` + `npm run lint`**
 
 Expected: pasan. (Si eslint se queja de `js/desktop.js` por `window`, ya está
 en el glob `js/**` con `browserGlobals`; agregar `electronAPI` no hace falta —
 se accede como `window.electronAPI`.)
 
-- [ ] **Step 10: Commit**
+- [x] **Step 10: Commit**
 
 ```bash
 git add sistema/index.html js/desktop.js js/app.js sw.js
@@ -742,12 +746,12 @@ git commit -m "feat(desktop): version in footer + About dialog + SW guard"
 - Produces: `cd desktop && npm run dist` genera
   `desktop/dist/Casa Lucenzo Setup 1.0.0.exe` + `latest.yml`.
 
-- [ ] **Step 1: Icono**
+- [x] **Step 1: Icono**
 
 Copiar `img/logo-512.png` → `desktop/build/icon.png`. electron-builder genera el
 `.ico` multi-resolución desde ese PNG (necesita ser ≥ 256×256; 512 va bien).
 
-- [ ] **Step 2: `desktop/package.json` — bloque `build`**
+- [x] **Step 2: `desktop/package.json` — bloque `build`**
 
 Agregar al JSON:
 ```json
@@ -768,7 +772,7 @@ Agregar al JSON:
 }
 ```
 
-- [ ] **Step 3: `desktop/.env.example`**
+- [x] **Step 3: `desktop/.env.example`**
 
 ```
 # Token de GitHub con scope public_repo, para publicar releases.
@@ -776,20 +780,20 @@ Agregar al JSON:
 GH_TOKEN=
 ```
 
-- [ ] **Step 4: Build local (sin publicar)**
+- [x] **Step 4: Build local (sin publicar)**
 
 Run (desde la raíz, para tener www/ fresco): `npm run build`
 Run: `cd desktop && npm run dist`
 Expected: sin errores. `desktop/dist/Casa Lucenzo Setup 1.0.0.exe` existe, y
 `desktop/dist/latest.yml`. Peso del `.exe`: ~70-100 MB (Electron + www/).
 
-- [ ] **Step 5: Instalar y probar en una PC Windows**
+- [x] **Step 5: Instalar y probar en una PC Windows**
 
 Correr el `.exe`. Pasar la advertencia de SmartScreen ("Más info" → "Ejecutar de
 todas formas"). Expected: instala sin pedir admin, crea acceso directo "Casa
 Lucenzo", abre el POS. Login funciona. Footer `v1.0.0`. "Acerca de" abre.
 
-- [ ] **Step 6: Commit**
+- [x] **Step 6: Commit**
 
 ```bash
 git add desktop/package.json desktop/build/icon.png desktop/.env.example
@@ -809,7 +813,7 @@ git commit -m "feat(desktop): electron-builder config + NSIS installer"
   web + publish desktop. `npm run release:web` y `npm run release:desktop` por
   separado.
 
-- [ ] **Step 1: `package.json` scripts**
+- [x] **Step 1: `package.json` scripts**
 
 ```json
 "scripts": {
@@ -828,7 +832,7 @@ pushea a `main` (Vercel deploya). `release:desktop` publica a GitHub Releases
 (necesita `desktop/.env` con `GH_TOKEN` — electron-builder lo lee, o exportarlo
 en el shell). `git push --tags` sube el tag `v1.0.1`.
 
-- [ ] **Step 2: Runbook**
+- [x] **Step 2: Runbook**
 
 `docs/superpowers/plans/electron-release-runbook.md` — pasos manuales:
 1. Estar en `main`, limpio, `git pull`.
@@ -841,13 +845,13 @@ en el shell). `git push --tags` sube el tag `v1.0.1`.
 6. Si algo salió mal: `npm version patch` con el fix y `npm run release` de nuevo
    (versión más alta). Los instaladores viejos quedan en Releases.
 
-- [ ] **Step 3: Dry-run de `release:desktop`**
+- [x] **Step 3: Dry-run de `release:desktop`**
 
 Sin `GH_TOKEN`: `npm run release:desktop` debe fallar claro en el paso de
 publish (no en el build). Con `--publish never` (el `dist` script) ya se probó
 en Task 7. Confirmar que el `build` corre y solo el `publish` necesita token.
 
-- [ ] **Step 4: Commit**
+- [x] **Step 4: Commit**
 
 ```bash
 git add package.json docs/superpowers/plans/electron-release-runbook.md
@@ -864,12 +868,12 @@ git commit -m "feat(desktop): release scripts + runbook"
 - Consumes: todo lo anterior, en `main`.
 - Produces: Release `v1.0.0` publicada; ciclo de update verificado con `v1.0.1`.
 
-- [ ] **Step 1: Merge a `main`**
+- [x] **Step 1: Merge a `main`**
 
 PR `feature/electron-desktop` → `main`, revisar el diff, mergear. `npm test` y
 `npm run lint` verdes en CI.
 
-- [ ] **Step 2: Publicar `v1.0.0`**
+- [x] **Step 2: Publicar `v1.0.0`**
 
 Desde `main` limpio, con `GH_TOKEN`:
 ```bash

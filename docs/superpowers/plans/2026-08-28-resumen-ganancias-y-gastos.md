@@ -1,5 +1,7 @@
 # Resumen de Ganancias + Gestión de Gastos — Implementation Plan
 
+> **Estado (revisado 2026-09-27): implementado.** Migración `020_expense_categories.sql`, `estimateProductionCost` y `aggregatePnl` en `js/analytics.js` (con tests en `tests/unit.test.js`), `fetchExpensesRange`/`fetchPnlData` en `js/supabase.js`, pestañas "Gastos" y "Ganancias" y `exportPnlToPDF`. El "Deploy checklist" de abajo era para Casa Lucenzo; no se re-verificó contra la base de El Puño.
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** Add a weekly/monthly profit summary (Ventas − Costo terceros − Gastos = Ganancia neta) with per-category product breakdown and PDF export, plus an admin section to log categorized fixed expenses (arriendo, sueldos, servicios) in $ or Bs.
@@ -49,7 +51,7 @@
 **Interfaces:**
 - Produces: `expenses.category text` (nullable), `expenses.currency text NOT NULL DEFAULT 'USD'`, `expenses.bcv_rate numeric` (nullable).
 
-- [ ] **Step 1: Write the migration file**
+- [x] **Step 1: Write the migration file**
 
 ```sql
 -- Migration 020: Categorías y moneda en gastos
@@ -81,12 +83,12 @@ ALTER TABLE public.expenses ADD COLUMN IF NOT EXISTS bcv_rate numeric;
 COMMIT;
 ```
 
-- [ ] **Step 2: Verify it parses / dry check**
+- [x] **Step 2: Verify it parses / dry check**
 
 Run: `node -e "const s=require('fs').readFileSync('supabase/migrations/020_expense_categories.sql','utf8'); if(!/ADD COLUMN IF NOT EXISTS/.test(s)) throw new Error('bad'); console.log('ok')"`
 Expected: prints `ok`
 
-- [ ] **Step 3: Commit**
+- [x] **Step 3: Commit**
 
 ```bash
 git add supabase/migrations/020_expense_categories.sql
@@ -113,7 +115,7 @@ Generalizes the per-day tercero-cost estimation currently inlined in `exportDayC
   - `usd`: real days converted per-sale by `cost_at_sale / (sale.bcv_rate || bcvRate)`; estimated days converted by `estimatedDayBs / bcvRate`.
   - a day is "estimated" only when its Σ `cost_at_sale` is 0 **and** it had ≥1 non-`abono` sale of a product whose `cost > 0`.
 
-- [ ] **Step 1: Write the failing tests**
+- [x] **Step 1: Write the failing tests**
 
 Add to `tests/unit.test.js` inside `runAnalyticsUnitTests()` (after the existing analytics assertions). Reuse the file's `pastWeekday`/`saleAt` helpers; extend `saleAt` locally with a variant that sets `cost_at_sale` and `bcv_rate`:
 
@@ -179,12 +181,12 @@ const {
 } = require('../js/analytics');
 ```
 
-- [ ] **Step 2: Run tests to verify they fail**
+- [x] **Step 2: Run tests to verify they fail**
 
 Run: `npm test`
 Expected: FAIL — `getEstimate is not a function` (or the Analytics suite throws).
 
-- [ ] **Step 3: Implement `estimateProductionCost` in `js/analytics.js`**
+- [x] **Step 3: Implement `estimateProductionCost` in `js/analytics.js`**
 
 Add after `getDailyPrepRecommendation` (uses the file's existing `parseTimestamp` / `dateKey`):
 
@@ -263,16 +265,16 @@ function estimateProductionCost(sales = [], products = [], bcvRate = 1) {
 }
 ```
 
-- [ ] **Step 4: Add to both exports in `js/analytics.js`**
+- [x] **Step 4: Add to both exports in `js/analytics.js`**
 
 In the `AnalyticsManager` object literal add `estimateProductionCost,`. In the `module.exports = { ... }` block add `estimateProductionCost,`. (Leave `aggregatePnl` out until Task 4.)
 
-- [ ] **Step 5: Run tests to verify they pass**
+- [x] **Step 5: Run tests to verify they pass**
 
 Run: `npm test`
 Expected: PASS — the 3 new `estimateProductionCost` assertions print `✅`.
 
-- [ ] **Step 6: Commit**
+- [x] **Step 6: Commit**
 
 ```bash
 git add js/analytics.js tests/unit.test.js
@@ -291,7 +293,7 @@ Removes the duplicate estimation logic. Behavior for a single day must not chang
 **Interfaces:**
 - Consumes: `AnalyticsManager.estimateProductionCost(sales, products, bcvRate)` from Task 2.
 
-- [ ] **Step 1: Replace the inline estimation block**
+- [x] **Step 1: Replace the inline estimation block**
 
 In `exportDayCloseToPDF`, replace lines ~4576-4602 (from the `// Costo de producción por venta` comment through `const netMarginBs = ...`) with:
 
@@ -307,21 +309,21 @@ In `exportDayCloseToPDF`, replace lines ~4576-4602 (from the `// Costo de produc
 
 Note: the old code only estimated when `totalProductionCostBs === 0` for the whole (single-day) `salesLog`; `estimateProductionCost` does the same thing per-day, and a day-close is one day, so the result is identical. The `totalProductionCostBs` local is no longer needed — delete its declaration (~line 4578) if nothing else references it (grep within the function).
 
-- [ ] **Step 2: Verify no other reference broke**
+- [x] **Step 2: Verify no other reference broke**
 
 Run: `grep -n "totalProductionCostBs\|isEstimatedCost\|productionCostBsForDisplay" js/ui.js`
 Expected: every remaining hit is inside `exportDayCloseToPDF` and resolves to the new locals.
 
-- [ ] **Step 3: Run tests**
+- [x] **Step 3: Run tests**
 
 Run: `npm test`
 Expected: PASS (no test covers this function directly; this confirms nothing else broke).
 
-- [ ] **Step 4: Manual smoke (dev server)**
+- [x] **Step 4: Manual smoke (dev server)**
 
 Start dev server (`.claude/launch.json` → preview_start), log in as admin, open a day-close report for a recent day and for a pre-2026-08-22 day. Confirm the "Costo de Producción (Terceros)" KPI shows a real value for the recent day and an "(Estimado)" value for the old day, same as before.
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add js/ui.js
@@ -374,7 +376,7 @@ Expense category: `arriendo|sueldos|servicios` pass through; anything else (incl
 Expense USD: `currency` is `VES`/`Bs` ⇒ `amount / (bcv_rate || bcvRate)`; else `amount` as-is.
 `costoTercerosUsd` per category: only `pasteles` (and any `otros`/category whose products have `cost>0`) get a share — computed as the category's portion of `estimateProductionCost`. Simplest correct approach: run `estimateProductionCost` on the full `sales` for `totals`, and for per-category, run it again on the subset of sales whose resolved category === that category.
 
-- [ ] **Step 1: Write the failing tests**
+- [x] **Step 1: Write the failing tests**
 
 Add to `runAnalyticsUnitTests()` in `tests/unit.test.js`:
 
@@ -440,12 +442,12 @@ Add to `runAnalyticsUnitTests()` in `tests/unit.test.js`:
     console.log("✅ TEST PASSED: aggregatePnl handles an empty period");
 ```
 
-- [ ] **Step 2: Run tests to verify they fail**
+- [x] **Step 2: Run tests to verify they fail**
 
 Run: `npm test`
 Expected: FAIL — `aggregatePnl is not a function`.
 
-- [ ] **Step 3: Implement `aggregatePnl` in `js/analytics.js`**
+- [x] **Step 3: Implement `aggregatePnl` in `js/analytics.js`**
 
 Add after `estimateProductionCost`:
 
@@ -607,16 +609,16 @@ function aggregatePnl(sales = [], expenses = [], products = [], opts = {}) {
 
 (Note `resolveExpenseCategory` collapses to `'otros'` for anything not in the known set — the ternary is written verbosely for clarity; a reviewer may simplify to `return EXPENSE_CATEGORY_META[c] ? c : 'otros';`.)
 
-- [ ] **Step 4: Export it**
+- [x] **Step 4: Export it**
 
 Add `aggregatePnl,` to both the `AnalyticsManager` object and the `module.exports` block in `js/analytics.js`.
 
-- [ ] **Step 5: Run tests to verify they pass**
+- [x] **Step 5: Run tests to verify they pass**
 
 Run: `npm test`
 Expected: PASS — all 4 new `aggregatePnl` assertion groups print `✅`.
 
-- [ ] **Step 6: Commit**
+- [x] **Step 6: Commit**
 
 ```bash
 git add js/analytics.js tests/unit.test.js
@@ -636,7 +638,7 @@ git commit -m "feat(analytics): aggregatePnl — weekly/monthly P&L with categor
   - `fetchExpensesRange(startISO, endISO) -> Promise<Array>` — expense rows in `[start, end)`.
   - `fetchPnlData(startISO, endISO) -> Promise<{ sales: Array, expenses: Array }>` — sales rows have `productId` normalized from `product_id`.
 
-- [ ] **Step 1: Extend `insertExpense` payload (`js/supabase.js:633-640`)**
+- [x] **Step 1: Extend `insertExpense` payload (`js/supabase.js:633-640`)**
 
 ```javascript
 async function insertExpense(expense) {
@@ -653,7 +655,7 @@ async function insertExpense(expense) {
     // ... rest unchanged
 ```
 
-- [ ] **Step 2: Add the two fetch functions**
+- [x] **Step 2: Add the two fetch functions**
 
 Place near `fetchStatsData` (`js/supabase.js:~1114`):
 
@@ -692,16 +694,16 @@ async function fetchPnlData(startISO, endISO) {
 }
 ```
 
-- [ ] **Step 3: Export both**
+- [x] **Step 3: Export both**
 
 In `window.SupabaseManager = { ... }` (`js/supabase.js:1502`), add `fetchExpensesRange,` and `fetchPnlData,` near `fetchStatsData`.
 
-- [ ] **Step 4: Sanity check (no unit test — browser-only module)**
+- [x] **Step 4: Sanity check (no unit test — browser-only module)**
 
 Run: `node -e "require('./js/supabase.js')" 2>&1 | head -1` — will error on `window` (expected: the module is browser-only). Instead verify syntax: `node --check js/supabase.js`
 Expected: no output (syntax OK).
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add js/supabase.js
@@ -721,7 +723,7 @@ git commit -m "feat(supabase): fetchPnlData/fetchExpensesRange + category/curren
 - Consumes: `SupabaseManager.fetchExpensesRange`, `SupabaseManager.insertExpense`, `SupabaseManager.deleteExpense`, `AnalyticsManager` (for the `expenseUsd` conversion — expose a tiny helper or inline the same math), `window.bcvRate`.
 - Produces: `UIManager.renderAdminExpenses(expenses, { month, category, bcvRate }, onDelete)`.
 
-- [ ] **Step 1: Add the sidebar button in `sistema/index.html`**
+- [x] **Step 1: Add the sidebar button in `sistema/index.html`**
 
 After `admin-tab-btn-costs` (line ~598), still inside the `Operación` section:
 
@@ -732,7 +734,7 @@ After `admin-tab-btn-costs` (line ~598), still inside the `Operación` section:
                     </button>
 ```
 
-- [ ] **Step 2: Add the panel div in `sistema/index.html`**
+- [x] **Step 2: Add the panel div in `sistema/index.html`**
 
 After the `admin-panel-costs` closing `</div>` (locate: panel starts line ~970). Mirror the `admin-panel-analytics` structure:
 
@@ -777,7 +779,7 @@ After the `admin-panel-costs` closing `</div>` (locate: panel starts line ~970).
                 </div>
 ```
 
-- [ ] **Step 3: `renderAdminExpenses` in `js/ui.js`**
+- [x] **Step 3: `renderAdminExpenses` in `js/ui.js`**
 
 Add near `renderExpenses` (grep for `function renderExpenses`). Export on `window.UIManager`.
 
@@ -842,7 +844,7 @@ function renderAdminExpenses(expenses = [], filter = {}, onDelete) {
 }
 ```
 
-- [ ] **Step 4: Extend `addExpense` shape in `js/app.js:1375-1380`**
+- [x] **Step 4: Extend `addExpense` shape in `js/app.js:1375-1380`**
 
 ```javascript
     const newExpense = {
@@ -856,7 +858,7 @@ function renderAdminExpenses(expenses = [], filter = {}, onDelete) {
     };
 ```
 
-- [ ] **Step 5: Add `addAdminExpense` + `loadAndRenderExpensesTab` in `js/app.js`**
+- [x] **Step 5: Add `addAdminExpense` + `loadAndRenderExpensesTab` in `js/app.js`**
 
 Near `addExpense` / `deleteExpense`:
 
@@ -936,7 +938,7 @@ function setAdminExpenseDateDefault() {
 }
 ```
 
-- [ ] **Step 6: Wire the tab + form in `initAdminDashboardListeners()` (`js/app.js`)**
+- [x] **Step 6: Wire the tab + form in `initAdminDashboardListeners()` (`js/app.js`)**
 
 Add alongside the other `getElementById` tab lookups and `activateTab` calls:
 
@@ -973,23 +975,23 @@ Add alongside the other `getElementById` tab lookups and `activateTab` calls:
     if (admExpMonth) admExpMonth.addEventListener('change', () => loadAndRenderExpensesTab(true));
 ```
 
-- [ ] **Step 7: Export `renderAdminExpenses` on `window.UIManager`**
+- [x] **Step 7: Export `renderAdminExpenses` on `window.UIManager`**
 
 Grep for the `window.UIManager = {` assignment (or the `UIManager` object) in `js/ui.js` and add `renderAdminExpenses,`.
 
-- [ ] **Step 8: Syntax check + tests**
+- [x] **Step 8: Syntax check + tests**
 
 Run: `node --check js/app.js && node --check js/ui.js && npm test`
 Expected: no syntax errors; all tests still PASS.
 
-- [ ] **Step 9: Manual smoke (dev server, admin)**
+- [x] **Step 9: Manual smoke (dev server, admin)**
 
 - Open the new "Gastos" tab. Add an arriendo of `$100` dated today → appears in the list, "Total del filtro" = `$100.00`.
 - Add a servicio of `Bs 2000` with a toggle to Bs → list shows `Bs. 2.000,00` original and the `$` equivalent at the current rate.
 - Change the category filter chips and the month picker → list filters correctly.
 - Delete a row → disappears, total updates.
 
-- [ ] **Step 10: Commit**
+- [x] **Step 10: Commit**
 
 ```bash
 git add sistema/index.html js/ui.js js/app.js
@@ -1009,7 +1011,7 @@ git commit -m "feat: admin Gastos tab — categorized expense logging in USD/VES
 - Consumes: `SupabaseManager.fetchPnlData`, `AnalyticsManager.aggregatePnl`, module-scope `products`, `window.bcvRate`.
 - Produces: `UIManager.renderPnl(pnl, { mode })` — renders into `#admin-pnl-container`. `pnl` shape from Task 4.
 
-- [ ] **Step 1: Sidebar button (`sistema/index.html`), right after `admin-tab-btn-expenses`**
+- [x] **Step 1: Sidebar button (`sistema/index.html`), right after `admin-tab-btn-expenses`**
 
 ```html
                     <button id="admin-tab-btn-pnl" class="admin-tab-btn">
@@ -1018,7 +1020,7 @@ git commit -m "feat: admin Gastos tab — categorized expense logging in USD/VES
                     </button>
 ```
 
-- [ ] **Step 2: Panel div (`sistema/index.html`), after `admin-panel-expenses`**
+- [x] **Step 2: Panel div (`sistema/index.html`), after `admin-panel-expenses`**
 
 ```html
                 <div id="admin-panel-pnl" class="admin-panel">
@@ -1045,7 +1047,7 @@ git commit -m "feat: admin Gastos tab — categorized expense logging in USD/VES
                 </div>
 ```
 
-- [ ] **Step 3: Period math + `loadPnl` in `js/app.js`**
+- [x] **Step 3: Period math + `loadPnl` in `js/app.js`**
 
 ```javascript
 let pnlMode = 'week';       // 'week' | 'month'
@@ -1109,7 +1111,7 @@ async function loadPnl(forceRefetch = false) {
 }
 ```
 
-- [ ] **Step 4: `renderPnl` in `js/ui.js`**
+- [x] **Step 4: `renderPnl` in `js/ui.js`**
 
 ```javascript
 /**
@@ -1193,7 +1195,7 @@ function renderPnl(pnl, opts = {}) {
 }
 ```
 
-- [ ] **Step 5: Wire the tab + nav in `initAdminDashboardListeners()` (`js/app.js`)**
+- [x] **Step 5: Wire the tab + nav in `initAdminDashboardListeners()` (`js/app.js`)**
 
 ```javascript
     const tabPnlBtn = document.getElementById('admin-tab-btn-pnl');
@@ -1233,14 +1235,14 @@ function renderPnl(pnl, opts = {}) {
     });
 ```
 
-- [ ] **Step 6: Export `renderPnl` on `window.UIManager`** (add `renderPnl,` to the object).
+- [x] **Step 6: Export `renderPnl` on `window.UIManager`** (add `renderPnl,` to the object).
 
-- [ ] **Step 7: Syntax check + tests**
+- [x] **Step 7: Syntax check + tests**
 
 Run: `node --check js/app.js && node --check js/ui.js && npm test`
 Expected: clean; tests PASS.
 
-- [ ] **Step 8: Manual smoke (dev server, admin)**
+- [x] **Step 8: Manual smoke (dev server, admin)**
 
 - Open "Ganancias". Default = current week. Cascade shows Ventas / −Terceros / −Gastos / = Ganancia neta with $ and Bs columns.
 - Toggle to "Mes" → shows current calendar month; the amber estimation banner appears for August 2026 (period crosses Aug 22).
@@ -1248,7 +1250,7 @@ Expected: clean; tests PASS.
 - Click "Gastos del local" row → expands per-category detail. Click a category row → expands its product list.
 - Cross-check one week's Ventas total against the sum of that week's day-close PDFs.
 
-- [ ] **Step 9: Commit**
+- [x] **Step 9: Commit**
 
 ```bash
 git add sistema/index.html js/ui.js js/app.js
@@ -1266,7 +1268,7 @@ git commit -m "feat: admin Ganancias tab — weekly/monthly P&L summary with nav
 - Consumes: `pnl` (Task 4 shape), `{ mode, bcvRate }`.
 - Pattern: copy `exportSalesAnalyticsToPDF` (`js/ui.js:~2140`) — `window.open('', '_blank')`, `document.write(fullHtmlDoc)`, `window.onload → setTimeout(window.print, 400)`, `document.close()`.
 
-- [ ] **Step 1: Implement**
+- [x] **Step 1: Implement**
 
 ```javascript
 /**
@@ -1328,16 +1330,16 @@ function exportPnlToPDF(pnl, opts = {}) {
 }
 ```
 
-- [ ] **Step 2: Export on `window.UIManager`** — add `exportPnlToPDF,`.
+- [x] **Step 2: Export on `window.UIManager`** — add `exportPnlToPDF,`.
 
-- [ ] **Step 3: Syntax + tests**
+- [x] **Step 3: Syntax + tests**
 
 Run: `node --check js/ui.js && npm test`
 Expected: clean; PASS.
 
-- [ ] **Step 4: Manual smoke** — in "Ganancias", click "PDF" for a week and a month. The print dialog opens; the sheet shows the cascade, per-category table with product sub-rows, the expense breakdown, and the estimation note for August.
+- [x] **Step 4: Manual smoke** — in "Ganancias", click "PDF" for a week and a month. The print dialog opens; the sheet shows the cascade, per-category table with product sub-rows, the expense breakdown, and the estimation note for August.
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add js/ui.js
@@ -1352,27 +1354,27 @@ git commit -m "feat(ui): exportPnlToPDF — printable weekly/monthly profit summ
 - Modify: `sistema/index.html` (16 `?v=317` → `?v=318`)
 - Modify: `sw.js` (`APP_VERSION = '317'` → `'318'`)
 
-- [ ] **Step 1: Bump `sistema/index.html`**
+- [x] **Step 1: Bump `sistema/index.html`**
 
 Run: `sed -i 's/?v=317/?v=318/g' sistema/index.html`
 Then verify: `grep -c "?v=318" sistema/index.html` → expect `17`; `grep -c "?v=317" sistema/index.html` → expect `0`.
 
-- [ ] **Step 2: Bump `sw.js`**
+- [x] **Step 2: Bump `sw.js`**
 
 Change line 8: `const APP_VERSION = '318';`
 Verify: `grep -n "APP_VERSION = '318'" sw.js` → 1 hit. `grep -n "317" sw.js` → 0 hits.
 
-- [ ] **Step 3: Full test run**
+- [x] **Step 3: Full test run**
 
 Run: `npm test`
 Expected: `🎉 ALL UNIT TESTS PASSED` — Core, Analytics (with the new `estimateProductionCost` + `aggregatePnl` assertions), Legacy credentials, WhatsApp, Telegram suites all green.
 
-- [ ] **Step 4: Lint**
+- [x] **Step 4: Lint**
 
 Run: `npx eslint js/analytics.js js/app.js js/ui.js js/supabase.js`
 Expected: no errors (fix any that appear — match surrounding style).
 
-- [ ] **Step 5: Full manual QA pass (dev server, admin)** — run the whole spec §6 "Manual" checklist:
+- [x] **Step 5: Full manual QA pass (dev server, admin)** — run the whole spec §6 "Manual" checklist:
 
 - "Ganancias": toggle Semana/Mes, navigate several periods each way, `›` disabled at the current period.
 - One week's Ventas total == sum of that week's day-close PDFs.
@@ -1383,7 +1385,7 @@ Expected: no errors (fix any that appear — match surrounding style).
 - Existing day-close report still shows real vs "(Estimado)" tercero cost (Task 3 regression).
 - Resize below 768px → both new tabs collapse to the icon row with the rest (no broken layout).
 
-- [ ] **Step 6: Commit**
+- [x] **Step 6: Commit**
 
 ```bash
 git add sistema/index.html sw.js

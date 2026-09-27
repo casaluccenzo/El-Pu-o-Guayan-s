@@ -1,5 +1,7 @@
 # Admin Dashboard Additions Implementation Plan
 
+> **Estado (revisado 2026-09-27): implementado.** Todo está en el código: botón "Dashboard" en el sidebar, KPI "Ticket Promedio", botón "Reporte PDF" (`exportDashboardSummaryToPDF` en `js/ui.js`), migración `016_add_activity_logs_actor_name.sql` y `actor_name` en ambas vistas de actividad. Los pasos de chequeo manual se marcan por estar la función en producción, no porque se hayan vuelto a correr.
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** Add the four pieces of real, missing scope from `proto-admin-resumen.html` to the live Admin Dashboard panel: a "Dashboard" nav label (fixing a naming collision with the unrelated `view-resumen` screen), a Ticket Promedio KPI card, a branded "Reporte PDF" export button, and per-employee attribution on Actividad Reciente.
@@ -29,7 +31,7 @@
 - Consumes: nothing new
 - Produces: nothing new — pure text change, no IDs or JS touched
 
-- [ ] **Step 1: Make the change**
+- [x] **Step 1: Make the change**
 
 In `sistema/index.html`, find (around line 577):
 
@@ -48,11 +50,11 @@ Change the `<span>` text to:
 
 Do not change the button `id` (`admin-tab-btn-summary`) — `js/app.js:4309` looks it up by that exact ID.
 
-- [ ] **Step 2: Manual check**
+- [x] **Step 2: Manual check**
 
 Run the dev server (`npm run dev`), log in as admin, open the ⚙️ settings panel, confirm the sidebar's first item now reads "Dashboard" and still opens the same KPI panel as before.
 
-- [ ] **Step 3: Commit**
+- [x] **Step 3: Commit**
 
 ```bash
 git add sistema/index.html
@@ -77,7 +79,7 @@ Resumen ya nombra una pantalla distinta y no relacionada
 
 **Important data note:** `salesLog` entries are per product *unit*, not per transaction — a single checkout that sells 3 items produces 3 entries sharing the exact same `timestamp` (see `js/app.js:756-768`, the `newSales` loop uses one shared `const timestamp` for the whole cart). So "cantidad de operaciones" (transaction count) must be the count of **distinct timestamps**, not `todaySales.length`.
 
-- [ ] **Step 1: Add the HTML card**
+- [x] **Step 1: Add the HTML card**
 
 In `sistema/index.html`, inside `.admin-kpi-grid`, right after the closing `</div>` of the `gastos` card and before the `dispositivos` card (around line 672-673):
 
@@ -92,7 +94,7 @@ In `sistema/index.html`, inside `.admin-kpi-grid`, right after the closing `</di
                             </div>
 ```
 
-- [ ] **Step 2: Widen the grid from 4 to 5 columns**
+- [x] **Step 2: Widen the grid from 4 to 5 columns**
 
 In `css/components.css:1931`, change:
 
@@ -108,7 +110,7 @@ to:
 
 Leave the `768px` mobile override at `css/components.css:2297` (`repeat(2, minmax(0, 1fr)) !important`) untouched — 5 cards in 2 columns leaves the last card alone on its own row, which the grid already handles fine with no extra CSS.
 
-- [ ] **Step 3: Compute and render the value**
+- [x] **Step 3: Compute and render the value**
 
 In `js/ui.js`, inside `renderStats()`, right after the existing block that sets `gastosKpiEl.textContent` (around line 1852), add:
 
@@ -131,11 +133,11 @@ In `js/ui.js`, inside `renderStats()`, right after the existing block that sets 
     }
 ```
 
-- [ ] **Step 4: Manual check**
+- [x] **Step 4: Manual check**
 
 On the dev server, as admin, open Dashboard. With no sales today it should show "—" / "sin operaciones hoy". Register a couple of test sales (different products, same checkout) and confirm: (a) the card shows total ÷ number of *checkouts*, not ÷ number of line items, and (b) the count label matches how many separate "Agregar a la cuenta" checkouts you did, not how many products.
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add sistema/index.html css/components.css js/ui.js
@@ -160,7 +162,7 @@ distintas por timestamp, no líneas de producto)."
 
 This follows the existing `window.open('', '_blank')` → `document.write(...)` → `document.close()` pattern used by `exportDayCloseToPDF` (`js/ui.js:4316`), `exportHourlyStatsToPDF` (`js/ui.js:4784`), and `exportSalesAnalyticsToPDF` (`js/ui.js:5351`) — reusing their branded CSS header block for visual consistency, but deliberately smaller: this is a KPI snapshot, not a full sales report with category/product breakdowns (those already have their own PDF buttons elsewhere in the app).
 
-- [ ] **Step 1: Add the button next to "Refrescar"**
+- [x] **Step 1: Add the button next to "Refrescar"**
 
 In `sistema/index.html`, around line 626-633, change:
 
@@ -191,7 +193,7 @@ to:
                         </div>
 ```
 
-- [ ] **Step 2: Add the export function to `js/ui.js`**
+- [x] **Step 2: Add the export function to `js/ui.js`**
 
 Add this new function right after `renderRecentActivity` (after its closing `}`, around line 2095):
 
@@ -313,7 +315,7 @@ function exportDashboardSummaryToPDF() {
 
 Add `exportDashboardSummaryToPDF,` to the `window.UIManager = { ... }` export object at the bottom of `js/ui.js` (same list where `renderRecentActivity` was added).
 
-- [ ] **Step 3: Wire the button in `js/app.js`**
+- [x] **Step 3: Wire the button in `js/app.js`**
 
 Right after the existing `btnRecentActivityVerTodo` wiring (`js/app.js:4434-4439`), add:
 
@@ -324,11 +326,11 @@ Right after the existing `btnRecentActivityVerTodo` wiring (`js/app.js:4434-4439
     }
 ```
 
-- [ ] **Step 4: Manual check**
+- [x] **Step 4: Manual check**
 
 On the dev server, as admin, click "Reporte PDF". Confirm a new tab/window opens with the branded summary and the browser print dialog appears automatically. Confirm the values match what's on the Dashboard KPI cards at the moment of clicking (including Ticket Promedio from Task 2).
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add sistema/index.html js/ui.js js/app.js
@@ -355,7 +357,7 @@ KPIs ya renderizados, no un reporte nuevo con desglose."
 
 **Deploy-order requirement (real risk, see spec §3):** the migration must be applied to the database **before** the client code that sends `actor_name` reaches production, or every activity-log insert will fail (unknown column). Apply Step 1 to the production database first; do not deploy Steps 2-4 until it's confirmed applied.
 
-- [ ] **Step 1: Write and apply the migration**
+- [x] **Step 1: Write and apply the migration**
 
 Create `supabase/migrations/016_add_activity_logs_actor_name.sql`:
 
@@ -386,7 +388,7 @@ WHERE table_name = 'activity_logs' AND column_name = 'actor_name';
 
 should return one row before moving on.
 
-- [ ] **Step 2: Thread `actorName` through `insertActivityLog`**
+- [x] **Step 2: Thread `actorName` through `insertActivityLog`**
 
 In `js/supabase.js`, change the function signature and payload (around line 1351-1374):
 
@@ -421,7 +423,7 @@ async function insertActivityLog(role, action, details, actorName) {
 
 (The rest of the function — the offline-queue try/catch — is unchanged.)
 
-- [ ] **Step 3: Pass `currentUser.name` from `logActivity`**
+- [x] **Step 3: Pass `currentUser.name` from `logActivity`**
 
 In `js/app.js`, change `logActivity` (around line 3027-3031):
 
@@ -438,7 +440,7 @@ Also update the local-fallback branch a few lines below (around line 3035-3040) 
 
 Note: `currentUser` is declared at `js/app.js:3102`, *after* `logActivity` at line 3027 — this works because `logActivity` is only ever called after login (function declarations are hoisted and `currentUser` is read at call time, not definition time), but it means `currentUser` will be `null` for any `logActivity` call that happens before the first login in a session (there are none today — grep confirms every call site is inside authenticated flows). No change needed, just noting why this isn't a bug.
 
-- [ ] **Step 4: Display `actor_name` in both activity views**
+- [x] **Step 4: Display `actor_name` in both activity views**
 
 In `js/ui.js`, `renderRecentActivity` (around line 2066), the `.map(log => ...)` template currently renders `log.action` directly. Change the action line to include the actor when present:
 
@@ -448,11 +450,11 @@ In `js/ui.js`, `renderRecentActivity` (around line 2066), the `.map(log => ...)`
 
 Apply the identical change to `renderActivityLogs` (around line 1975) wherever it renders the `ACCIÓN REALIZADA` cell — append `${log.actor_name ? ' · ' + escapeHtml(log.actor_name) : ''}` the same way, so the full Bitácora table shows it too.
 
-- [ ] **Step 5: Manual check**
+- [x] **Step 5: Manual check**
 
 On the dev server: log out and log back in as admin (a fresh login after this change). Confirm the new "Inicio de Sesión" entry in Actividad Reciente shows the actor name appended (e.g. "Inicio de Sesión · Admin"). Confirm older entries (from before this change) still render without errors or an empty " · " artifact.
 
-- [ ] **Step 6: Commit**
+- [x] **Step 6: Commit**
 
 ```bash
 git add supabase/migrations/016_add_activity_logs_actor_name.sql js/supabase.js js/app.js js/ui.js
@@ -475,20 +477,20 @@ Aditivo: registros viejos siguen mostrando solo el rol."
 - Consumes: nothing new
 - Produces: nothing new — this is the release-version bump for everything landed in Tasks 1-4, plus whatever was already sitting at `v286` per Global Constraints.
 
-- [ ] **Step 1: Bump the version**
+- [x] **Step 1: Bump the version**
 
 In `sistema/index.html`, replace every `?v=286` with `?v=287` (the `main.css` link and all 16 `<script>` tags).
 
 In `sw.js`, change `const APP_VERSION = '286';` to `const APP_VERSION = '287';`. Do not touch the `SCRIPTS` array itself — no files were added or removed, only edited.
 
-- [ ] **Step 2: Run the full verification checklist**
+- [x] **Step 2: Run the full verification checklist**
 
 Use the [[verifying-production-deploys]] skill now — this deploy touches `js/supabase.js`, `sistema/index.html`'s script tags, `sw.js`, and includes a DB migration, which is exactly its trigger list. Do not skip any item, in particular:
 - Confirm on a real custom domain, not just the Vercel preview.
 - Confirm the migration 016 is applied in production (Task 4 Step 1) before this deploy ships, not after.
 - Confirm `?v=` in `sistema/index.html` and `APP_VERSION` in `sw.js` match.
 
-- [ ] **Step 3: Commit**
+- [x] **Step 3: Commit**
 
 ```bash
 git add sistema/index.html sw.js
