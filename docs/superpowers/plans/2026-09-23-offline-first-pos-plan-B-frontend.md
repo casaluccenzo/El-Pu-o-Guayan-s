@@ -304,9 +304,7 @@ ejecutar, no asumirlo de una fecha de spec pasada).
   `supabase/tests/planB_assertions.sql` nuevo (mismo espíritu que
   `planA_assertions.sql`).
 
-- [ ] **Step 3: Gate — aplicar a producción — SIGUE BLOQUEADO, releído al
-      cerrar Task 16 (2026-09-27), no dar por resuelto solo porque el
-      código de Task 9 ya existe**
+- [x] **Step 3: Gate — aplicar a producción — RESUELTO (2026-09-27)**
 
   Estado original (2026-09-26): verificado contra producción real —
   `day_closes` tenía **0 filas** desde que existe la tabla (23-sep),
@@ -389,8 +387,45 @@ ejecutar, no asumirlo de una fecha de spec pasada).
         quedan en 0 antes de que abra el local.
   3. Recién entonces arrancar la Task 17.
 
-- [x] **Step 4: Commit** (archivos, verificados en dev — la aplicación a
-      producción queda pendiente, con runbook acordado arriba)
+  **Ejecutado en producción (2026-09-27), en este orden:**
+  1. Migración 034 aplicada — verificado por lectura directa (`pg_publication`/
+     `pg_publication_tables`): las 11 tablas correctas.
+  2. **Backfill correctivo pre-cutover** (paso no anticipado por el runbook
+     original, encontrado al preparar el deploy): el backfill del 23-sep
+     (migración 032) estaba desactualizado — el código viejo siguió
+     vendiendo/consumiendo con `UPDATE` directo a `products.stock` sin
+     registrar movimientos desde entonces, así que la suma de
+     `stock_movements` ya no coincidía con el stock real. Aplicar 033 sin
+     corregir esto primero habría mostrado stock viejo/incorrecto en el
+     momento del cutover para bebidas/dulces (pastelitos no se ven
+     afectados, su fórmula no depende del historial completo). Se calculó
+     el delta corrector exacto por producto (`stock real actual − suma ya
+     existente en stock_movements`, tipo `count_down`) contra una lectura
+     en vivo de producción — 8 productos necesitaban corrección (el resto
+     ya coincidía exacto). Verificado después: 0 discrepancias en los 30
+     productos.
+  3. Merge de `feature/offline-first-plan-b` a `main` por `git merge`
+     directo (el PR ya estaba abierto en GitHub, se mergeó por línea de
+     comandos a pedido de Gustavo) + push — deploy confirmado `READY` en
+     Vercel (`dpl_C5wcXSdgqjkddLTzf7jZ4PXFo27n`, commit `3bc8876`).
+  4. Migración 033 aplicada, con un forzado de recálculo inmediato
+     (`recompute_product_stock(id)` para cada producto) agregado a mano —
+     sin esto, las columnas reales no se hubieran actualizado hasta la
+     próxima venta o cierre real.
+  5. Verificado por lectura directa: `trigger_writes_real_columns = true`,
+     0 discrepancias entre columnas reales y sombra en los 30 productos,
+     totales por categoría coinciden con los valores reales
+     pre-cutover (pastelitos 0, bebidas 119, dulces 65 — sin crecimiento
+     descontrolado ni ceros espurios).
+
+  **Nota para la Task 17**: como se hizo el cutover completo hoy mismo
+  (no se esperó al cierre de jornada de la noche, decisión de Gustavo —
+  ver el intercambio en la sesión), `day_closes` sigue en 0 filas hasta el
+  próximo cierre real. Eso es esperado y no bloquea nada — la fórmula de
+  pastelitos ya está devolviendo 0 correctamente (nada que restar todavía).
+
+- [x] **Step 4: Commit** (archivos verificados en dev + aplicados a
+      producción hoy — ver el detalle de ejecución arriba)
 
 ---
 
@@ -1812,13 +1847,12 @@ ejecutar, no asumirlo de una fecha de spec pasada).
 > Esta task ya no es código: es desplegar, esperar, y comparar datos reales
 > en producción/staging, algo que le corresponde a Gustavo, no a un agente.
 >
-> **⚠️ Bloqueador real, encontrado al releer Task 2 antes de cerrar la
-> rama (2026-09-27): las migraciones 033 (columnas reales) y 034
-> (publication de PowerSync) nunca se aplicaron a producción — confirmado
-> por lectura directa de producción, no solo por `git log`. Runbook
-> acordado con Gustavo ya está en la Task 2, Step 3 (034 ya mismo, 033 +
-> sembrar `day_closes` en el momento exacto del deploy). No arrancar este
-> Step hasta completar ese runbook.**
+> **✅ Bloqueador resuelto (2026-09-27).** Merge a `main` + deploy +
+> migraciones 033/034 + backfill correctivo, todo ejecutado y verificado
+> el mismo día — ver el detalle completo en la Task 2, Step 3. `main` está
+> en producción (`dpl_C5wcXSdgqjkddLTzf7jZ4PXFo27n`) con PowerSync
+> publication activa y las columnas reales de `products` mantenidas por
+> el trigger. Ya se puede arrancar este Step cuando Gustavo lo decida.
 
 **Files:** ninguno (operación).
 
