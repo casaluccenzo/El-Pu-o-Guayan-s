@@ -70,16 +70,27 @@ if (brand) {
             manifest.description = meta.description || manifest.description;
             fs.writeFileSync(manifestPath, JSON.stringify(manifest, null, 2));
 
-            // "Casa Lucenzo"/"Casa Luccenzo" only ever appear as user-facing
-            // copy (title, footer, About dialog) in these files -- never as
-            // an identifier -- so a blanket string replace is safe here.
-            // Luc{1,2}enzo covers both the correct spelling and the "Luccenzo"
-            // typo that made it into some of these files.
-            const textFiles = ['index.html', 'pedido.html', 'qr-mesa.html', path.join('sistema', 'index.html')];
+            // "Casa Lucenzo" (and the "Casa Luccenzo" typo, and an all-caps
+            // "CASA LUCENZO" heading on the login screen) shows up as
+            // user-facing copy across the HTML shell AND the JS modules --
+            // WhatsApp message templates, generated report titles, the AI
+            // agent's system prompt. It's never used as a code identifier
+            // (always has a literal space), so a blanket case-insensitive
+            // replace across every shipped file is safe. Two passes preserve
+            // the found casing style rather than collapsing everything to
+            // one case (the login heading specifically wants upper-case).
+            const jsDir = path.join(destDir, 'js');
+            const jsFiles = fs.existsSync(jsDir)
+                ? fs.readdirSync(jsDir, { recursive: true })
+                    .filter(f => f.endsWith('.js') && !f.split(path.sep).includes('vendor'))
+                    .map(f => path.join('js', f))
+                : [];
+            const textFiles = ['index.html', 'pedido.html', 'qr-mesa.html', path.join('sistema', 'index.html'), ...jsFiles];
             for (const rel of textFiles) {
                 const p = path.join(destDir, rel);
                 if (!fs.existsSync(p)) continue;
                 let content = fs.readFileSync(p, 'utf8');
+                content = content.replace(/CASA LUC{1,2}ENZO/g, meta.displayName.toUpperCase());
                 content = content.replace(/Casa Luc{1,2}enzo/g, meta.displayName);
                 fs.writeFileSync(p, content, 'utf8');
             }
