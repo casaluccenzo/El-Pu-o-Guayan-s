@@ -1499,15 +1499,62 @@ async function setUserPinByAdmin(targetUserIdOrUsername, pin) {
 }
 
 /**
- * Verifies a quick PIN for a user via RPC (validated on server)
+ * Verifies a quick PIN for a user (Plan B, Task 10 -- spec §6 punto 2).
+ *
+ * Local-first: once PowerSync has synced, this compares against
+ * profiles.pin_hash straight from the local SQLite view via bcryptjs, no
+ * network needed -- verified in a real browser that bcryptjs correctly
+ * validates a hash pgcrypto's crypt(pin, gen_salt('bf')) produced (same
+ * bcrypt spec). Falls back to the verify_quick_pin RPC (still callable by
+ * an expired/anon session -- migración 023 kept it open on purpose for
+ * exactly this screen) only when there's no local db yet (e.g. before the
+ * very first sync ever completes on this device).
+ *
+ * The lockout counter (3 fails -> 60s) is intentionally NOT written to
+ * profiles.pin_failed_attempts/pin_locked_until from here -- see
+ * loadPinLockoutState in js/storage.js for why a plain client UPDATE to
+ * those columns would silently fail under RLS for any non-admin user.
  * @param {string} userId User UUID
  * @param {string} pin 4-digit PIN string
  * @returns {boolean} True if PIN is correct
  */
 async function verifyQuickPin(userId, pin) {
-    if (!client || !userId || !pin) return false;
+    if (!userId || !pin) return false;
+    const pinStr = String(pin).trim();
+    const localDb = getLocalDb();
+    if (localDb && window.bcrypt) {
+        try {
+            const profile = await localDb.getOptional('SELECT pin_hash FROM profiles WHERE id = ?', [userId]);
+            if (profile) {
+                if (!profile.pin_hash) return false;
+
+                const lockout = window.StorageManager.loadPinLockoutState(userId);
+                const now = Date.now();
+                if (lockout.lockedUntil && lockout.lockedUntil > now) {
+                    return false;
+                }
+
+                const isValid = window.bcrypt.compareSync(pinStr, profile.pin_hash);
+                if (isValid) {
+                    window.StorageManager.savePinLockoutState(userId, { attempts: 0, lockedUntil: null });
+                    return true;
+                }
+
+                const attempts = (lockout.attempts || 0) + 1;
+                const lockedUntil = attempts >= 3 ? now + 60000 : lockout.lockedUntil;
+                window.StorageManager.savePinLockoutState(userId, { attempts, lockedUntil });
+                return false;
+            }
+            // No local profile row at all -- this device never synced this
+            // user down (e.g. right after a brand new login, before the
+            // first PowerSync sync completes). Fall through to the RPC.
+        } catch (e) {
+            console.error("PowerSync local verifyQuickPin failed, falling back to Supabase RPC:", e);
+        }
+    }
+    if (!client) return false;
     try {
-        const { data, error } = await client.rpc('verify_quick_pin', { p_user_id: userId, p_pin: pin });
+        const { data, error } = await client.rpc('verify_quick_pin', { p_user_id: userId, p_pin: pinStr });
         if (error) throw error;
         return data === true;
     } catch (e) {

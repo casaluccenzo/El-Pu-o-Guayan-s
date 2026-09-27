@@ -54,6 +54,14 @@
          in sw.js -- the service worker keys its cache by the exact request URL,
          so a stale ?v= here means users keep running old JS. -->
     <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
+    <!-- Plan B, Task 10: bcryptjs, pure JS/zero deps, for local PIN
+         verification (js/supabase.js:verifyQuickPin). Verified in a real
+         browser that its UMD build exposes window.bcrypt via a plain
+         classic <script> (no bundler/module system needed), and that
+         bcrypt.compareSync() correctly validates a real hash pgcrypto's
+         crypt(pin, gen_salt('bf')) produced -- same bcrypt spec on both
+         sides. Pinned to an exact version like @powersync/web above. -->
+    <script src="https://cdn.jsdelivr.net/npm/bcryptjs@3.0.3/umd/index.js"></script>
     <!-- Plan B: PowerSync's main module comes from the CDN (same pattern as
          supabase-js right above) -- sw.js already caches any cross-origin
          request generically, so this is available offline after the first

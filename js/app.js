@@ -3389,15 +3389,21 @@ function resetInactivityTimer() {
 });
 
 /**
- * Updates the UI lockout banner during penalty block
+ * Updates the UI lockout banner during penalty block.
+ * @param {string} [userId] Plan B, Task 10: when given, reads the per-user
+ *   persisted PIN lockout (js/storage.js) instead of the global
+ *   lockoutUntil handleUserLogin() uses -- a full password login is
+ *   inherently online-only, so that one keeps its own separate counter,
+ *   untouched by this task.
  */
-function updateLockoutUI() {
+function updateLockoutUI(userId) {
     const banner = document.getElementById('pin-lockout-banner');
     if (!banner) return;
 
     const now = Date.now();
-    if (now < lockoutUntil) {
-        const remainingSec = Math.ceil((lockoutUntil - now) / 1000);
+    const until = userId ? (window.StorageManager.loadPinLockoutState(userId).lockedUntil || 0) : lockoutUntil;
+    if (now < until) {
+        const remainingSec = Math.ceil((until - now) / 1000);
         banner.innerHTML = `<i class="fa-solid fa-triangle-exclamation"></i> Acceso bloqueado por ${remainingSec}s por múltiples intentos fallidos.`;
         banner.classList.remove('hidden');
     } else {
@@ -3495,23 +3501,18 @@ async function handleUserLogin(username, password) {
 window.handleUserLogin = handleUserLogin;
 
 /**
- * Handles Quick PIN unlock via Supabase RPC server-side verification
+ * Handles Quick PIN unlock. Plan B, Task 10 (spec §6 punto 2): verification
+ * itself now runs local-first (bcrypt against the synced profiles.pin_hash,
+ * js/supabase.js:verifyQuickPin), no network required once this device has
+ * synced at least once. The 3-fails/60s lockout is per-user and persisted
+ * (js/storage.js:loadPinLockoutState/savePinLockoutState) instead of the
+ * in-memory, shared-with-handleUserLogin lockoutUntil/failedPinAttempts --
+ * verifyQuickPin already does the counting/locking itself, this function
+ * only reads the result back to drive the UI.
  * @param {string} pin 4-digit PIN string
  * @returns {boolean} Success state
  */
 async function handleQuickPINInput(pin) {
-    const now = Date.now();
-    if (now < lockoutUntil) {
-        const remainingSec = Math.ceil((lockoutUntil - now) / 1000);
-        triggerHaptic([80, 80]);
-        if (window.UIManager) window.UIManager.showToast(`⛔ Sistema bloqueado por seguridad. Espera ${remainingSec}s.`, "fa-solid fa-ban");
-        updateLockoutUI();
-        return false;
-    }
-
-    const pinStr = (pin || '').trim();
-    if (!pinStr) return false;
-
     let activeUser = currentUser;
     if (!activeUser) {
         try {
@@ -3524,6 +3525,19 @@ async function handleQuickPINInput(pin) {
         return false;
     }
 
+    const lockout = window.StorageManager.loadPinLockoutState(activeUser.id);
+    const now = Date.now();
+    if (lockout.lockedUntil && now < lockout.lockedUntil) {
+        const remainingSec = Math.ceil((lockout.lockedUntil - now) / 1000);
+        triggerHaptic([80, 80]);
+        if (window.UIManager) window.UIManager.showToast(`⛔ Sistema bloqueado por seguridad. Espera ${remainingSec}s.`, "fa-solid fa-ban");
+        updateLockoutUI(activeUser.id);
+        return false;
+    }
+
+    const pinStr = (pin || '').trim();
+    if (!pinStr) return false;
+
     let isValid = false;
     if (window.SupabaseManager && window.SupabaseManager.isConfigured()) {
         try {
@@ -3534,7 +3548,6 @@ async function handleQuickPINInput(pin) {
     }
 
     if (isValid) {
-        failedPinAttempts = 0;
         currentUser = activeUser;
         // Strictly the stored role -- same mapping handleUserLogin() uses.
         // This used to also grant admin to any username *containing* "admin"
@@ -3549,21 +3562,21 @@ async function handleQuickPINInput(pin) {
         logActivity("Desbloqueo PIN", `Reactivación de sesión de ${activeUser.name} vía PIN rápido`);
         return true;
     } else {
-        failedPinAttempts++;
+        // verifyQuickPin already incremented/persisted this user's lockout
+        // state -- read it back to decide what the UI shows.
+        const updated = window.StorageManager.loadPinLockoutState(activeUser.id);
         triggerHaptic([80, 80]);
 
-        if (failedPinAttempts >= 3) {
-            lockoutUntil = Date.now() + 60000;
-            failedPinAttempts = 0;
+        if (updated.lockedUntil && updated.lockedUntil > Date.now()) {
             if (window.UIManager) window.UIManager.showToast("⛔ 3 intentos fallidos de PIN. Sistema bloqueado por 60 segundos.", "fa-solid fa-triangle-exclamation");
             logActivity("Seguridad Alerta", `Intento fallido de PIN para usuario "${activeUser.username || activeUser.name}"`);
-            
-            updateLockoutUI();
+
+            updateLockoutUI(activeUser.id);
             if (lockoutCountdownInterval) clearInterval(lockoutCountdownInterval);
-            lockoutCountdownInterval = setInterval(updateLockoutUI, 1000);
+            lockoutCountdownInterval = setInterval(() => updateLockoutUI(activeUser.id), 1000);
         } else {
-            const remaining = 3 - failedPinAttempts;
-            if (window.UIManager) window.UIManager.showToast(`❌ PIN incorrecto (${remaining} intento${remaining > 1 ? 's' : ''} restante${remaining > 1 ? 's' : ''}).`, "fa-solid fa-circle-xmark");
+            const remaining = Math.max(0, 3 - (updated.attempts || 0));
+            if (window.UIManager) window.UIManager.showToast(`❌ PIN incorrecto (${remaining} intento${remaining !== 1 ? 's' : ''} restante${remaining !== 1 ? 's' : ''}).`, "fa-solid fa-circle-xmark");
         }
         return false;
     }

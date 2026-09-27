@@ -230,6 +230,38 @@ function savePreferences(prefs) {
     }
 }
 
+// ================= PIN LOCKOUT (Plan B, Task 10) =================
+//
+// Per-user, persisted across reloads -- unlike the in-memory lockoutUntil/
+// failedPinAttempts pair handleUserLogin() uses (a full password login is
+// inherently online-only, so that one wasn't touched by this task).
+// Deliberately local-only: profiles.pin_failed_attempts/pin_locked_until in
+// Postgres are only ever written by the SECURITY DEFINER PIN RPCs, because
+// the one UPDATE policy on profiles requires role='admin' (migración 001) --
+// a plain client-side write here for a non-admin user would just get
+// silently rejected by RLS once PowerSync tried to upload it. Keeping this
+// counter local-only sidesteps that instead of fighting it.
+const PIN_LOCKOUT_KEY_PREFIX = 'casa_lucenzo_pin_lockout_';
+
+function loadPinLockoutState(userId) {
+    try {
+        const raw = localStorage.getItem(PIN_LOCKOUT_KEY_PREFIX + userId);
+        if (!raw) return { attempts: 0, lockedUntil: null };
+        const parsed = JSON.parse(raw);
+        return { attempts: parsed.attempts || 0, lockedUntil: parsed.lockedUntil || null };
+    } catch (e) {
+        return { attempts: 0, lockedUntil: null };
+    }
+}
+
+function savePinLockoutState(userId, state) {
+    try {
+        localStorage.setItem(PIN_LOCKOUT_KEY_PREFIX + userId, JSON.stringify(state));
+    } catch (e) {
+        console.error("Failed to save PIN lockout state", e);
+    }
+}
+
 const BCV_PREFS_KEY = 'casa_lucenzo_bcv_prefs';
 
 function loadBcvPreferences() {
@@ -475,6 +507,8 @@ window.StorageManager = {
     saveCostInsumos,
     loadPreferences,
     savePreferences,
+    loadPinLockoutState,
+    savePinLockoutState,
     loadBcvPreferences,
     saveBcvPreferences,
     loadBcvLastFetch,

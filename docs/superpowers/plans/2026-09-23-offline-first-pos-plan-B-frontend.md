@@ -1051,16 +1051,22 @@ ejecutar, no asumirlo de una fecha de spec pasada).
 ## Task 10: PIN offline — validación local
 
 **Files:**
-- Modify: `js/pin-management.js`
-- Modify: `js/app.js` — `handleQuickPINInput` (3422-~3490)
+- Modify: `js/supabase.js` — `verifyQuickPin` reescrita (era la única que
+  necesitaba tocarse de verdad; `pin-management.js` es un wrapper delgado
+  que ya delegaba con la misma firma, no necesitó cambios)
+- Modify: `js/app.js` — `handleQuickPINInput`, `updateLockoutUI` (ahora
+  acepta un `userId` opcional)
+- Modify: `js/storage.js` — nuevas `loadPinLockoutState`/
+  `savePinLockoutState` (localStorage, por usuario)
+- Modify: `sistema/index.html` — `<script>` de `bcryptjs@3.0.3` (CDN, build
+  UMD)
 
 **Interfaces:**
 - Consumes: `profiles.pin_hash` ya replicado localmente por PowerSync
   (Task 1 sync rules — `profiles` baja completa).
 - Produces: `verifyQuickPin` corre contra la SQLite local con lockout
-  (`pin_failed_attempts`/`pin_locked_until`) evaluado en JS, sin red. El RPC
-  `verify_quick_pin` (Postgres, supabase.js:965) queda como fallback online
-  (spec §6, punto 2).
+  evaluado en JS, sin red. El RPC `verify_quick_pin` (Postgres) queda como
+  fallback solo para cuando no hay `localDb` todavía (spec §6, punto 2).
 
 > **La pieza más sensible en seguridad de todo Plan B.** El RPC actual usa
 > `crypt()`/`pgcrypto` (bcrypt) del lado de Postgres — replicarlo en el
@@ -1072,11 +1078,93 @@ ejecutar, no asumirlo de una fecha de spec pasada).
 > y hacer una revisión de seguridad dedicada (`/security-review`) de esta
 > task específica antes de darla por cerrada, aparte del resto del plan.
 
-- [ ] **Step 1: Elegir librería de hashing y confirmar con el usuario**
-- [ ] **Step 2: Reescribir la verificación local (lockout incluido)**
-- [ ] **Step 3: Revisión de seguridad dedicada de este código**
-- [ ] **Step 4: Test — 3 intentos fallidos bloquea local, igual que hoy en servidor**
-- [ ] **Step 5: Commit**
+- [x] **Step 1: Librería confirmada con el usuario — `bcryptjs@3.0.3`**
+
+  No se asumió la compatibilidad con `pgcrypto`/`crypt()` de Postgres --
+  se verificó real: `set_quick_pin('1234')` contra `casa-lucenzo-dev` generó
+  un hash real (`$2a$06$...`), y `bcrypt.compareSync('1234', eseHash)`
+  devolvió `true` (y `false` para un PIN incorrecto) en un navegador real.
+  Se usa el build UMD (`umd/index.js`) vía `<script src>` clásico -- se
+  confirmó que expone `window.bcrypt` sin necesitar módulo/bundler, mismo
+  patrón que `@supabase/supabase-js`.
+
+- [x] **Step 2: Reescribir la verificación local (lockout incluido)**
+
+  `verifyQuickPin` ahora lee `profiles.pin_hash` de SQLite local y compara
+  con `bcrypt.compareSync`. El lockout (3 fallos → 60s) se reescribió para
+  ser exactamente igual al del RPC (`005_pin_rate_limit.sql`): un intento
+  fallido SIEMPRE incrementa el contador (no se resetea al bloquear), y si
+  vuelven a fallar después de que el bloqueo anterior ya expiró, se
+  re-bloquea otros 60s (no hay "un solo bloqueo y ya"). Verificado en el
+  navegador real, incluyendo ese caso de re-bloqueo.
+
+  **Hallazgo al implementar, no estaba en el plan:** el contador NO se
+  puede persistir en `profiles.pin_failed_attempts`/`pin_locked_until` como
+  sugería el enunciado original. La única política RLS de `UPDATE` sobre
+  `profiles` exige rol `admin` (migración 001) -- por eso
+  `set_quick_pin`/`verify_quick_pin` son `SECURITY DEFINER` en primer lugar,
+  para poder tocar esas columnas sin serlo. Un `UPDATE` local vía
+  `db.execute` se subiría como un PATCH normal (no pasa por el RPC), y esa
+  policy lo rechazaría en silencio para cualquier usuario no-admin. El
+  contador de lockout offline vive en `localStorage` (`js/storage.js`,
+  por usuario), sin intentar converger con el contador del servidor --
+  son dos mecanismos paralelos, no una sola fuente de verdad.
+
+  También se separó del lockout compartido que `handleUserLogin` seguía
+  usando (`lockoutUntil`/`failedPinAttempts`, global, en memoria) --
+  login por contraseña es inherentemente online, así que se dejó intacto,
+  sin tocar. `updateLockoutUI` ahora acepta un `userId` opcional: sin él,
+  se comporta exactamente igual que antes (para `handleUserLogin`); con él,
+  lee el estado persistido por usuario (para `handleQuickPINInput`).
+
+- [x] **Step 3: Revisión de seguridad dedicada**
+
+  (El usuario eligió que la hiciera yo mismo al terminar, no una revisión
+  externa.) Hallazgos:
+
+  1. **Comparación de tiempo constante, confirmada leyendo el código
+     fuente de `bcryptjs`:** `compareSync` usa `safeStringCompare`
+     (XOR acumulado sobre todo el largo, sin salida anticipada) -- no hay
+     canal lateral de timing en la comparación en sí.
+  2. **El lockout local es descartable por quien tenga acceso al
+     dispositivo** (borrar esa clave de `localStorage` resetea el
+     contador a 0). Es una limitación real, pero inherente a hacer rate-
+     limiting del lado del cliente sin hardware seguro -- no hay una
+     mitigación client-side genuinamente mejor (ofuscar la clave sería
+     seguridad de utilería, no protección real).
+  3. **El hallazgo más importante, y no es nuevo de esta task:** para que
+     el PIN funcione offline, `profiles.pin_hash` tiene que estar
+     sincronizado localmente -- y eso ya pasaba desde la Task 1 (reglas de
+     sync), no algo que Task 10 haya introducido. Pero es recién ahora que
+     se vuelve prácticamente relevante: cualquiera con acceso a las
+     devtools del dispositivo puede leer ese hash directo de SQLite y
+     crackearlo offline, sin límite de intentos y sin pasar por
+     `verifyQuickPin` en absoluto. Con un PIN de 4 dígitos (10.000
+     combinaciones) y el costo bcrypt que usa `pgcrypto` por default
+     (`gen_salt('bf')` → costo 6, confirmado en el hash real de arriba:
+     `$2a$06$...`), el espacio completo se prueba en segundos en hardware
+     común -- ningún rate-limit de la aplicación protege contra esto una
+     vez que el hash salió del servidor. Esto es una tensión inherente al
+     requisito mismo ("PIN debe funcionar offline" implica que el hash
+     tiene que vivir en el dispositivo) y no algo que un cambio de código
+     en Task 10 pueda resolver sin contradecir ese requisito. Vale la pena
+     que el usuario/Gemini lo tengan explícitamente presente: lo que el
+     PIN protege es la reactivación rápida de una sesión ya autenticada en
+     un dispositivo ya desbloqueado una vez -- no el acceso inicial a la
+     cuenta -- así que el costo de este trade-off es bajo, pero es una
+     decisión consciente, no un descuido.
+
+- [x] **Step 4: Test — 3 intentos fallidos bloquea local, igual que hoy en servidor**
+
+  Verificado en `casa-lucenzo-dev` con el usuario de prueba: PIN correcto
+  → resetea contador; 3 fallos → bloquea 60s; PIN correcto DURANTE el
+  bloqueo → rechazado sin comparar (igual que el RPC); tras expirar el
+  bloqueo, un fallo más re-bloquea otros 60s (contador sigue en 4, no se
+  resetea) -- comportamiento idéntico al RPC en cada paso. Confirmado
+  también que el estado sobrevive un reload de la página (mejora real
+  sobre el mecanismo anterior, que era en memoria y se perdía al recargar).
+
+- [x] **Step 5: Commit**
 
 ---
 
