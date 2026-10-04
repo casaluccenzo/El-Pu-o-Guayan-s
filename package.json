@@ -28,6 +28,6 @@
   "devDependencies": {
     "@eslint/js": "^10.0.1",
     "eslint": "^10.11.0",
-    "sharp": "^0.35.4"
+    "sharp": "^0.35.5"
   }
 }
